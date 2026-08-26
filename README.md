@@ -125,7 +125,7 @@ Override these values with `SharedFrameConfig`.
 
 The `app` module contains equivalent Views and Compose feeds with carousel, grid, and vertical-list sources. Every transition uses the same loaded drawable/painter on both sides.
 
-https://github.com/azizconi/shared-frame-android/raw/refs/heads/main/media/sharedframe-demo.mp4
+https://github.com/user-attachments/assets/f5394699-aa79-4a1a-9dd7-b4cdc5a5bd64
 
 ## Building
 
