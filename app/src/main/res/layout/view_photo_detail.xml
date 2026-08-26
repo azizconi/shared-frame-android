@@ -1,0 +1,15 @@
+<?xml version="1.0" encoding="utf-8"?>
+<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android" android:layout_width="match_parent" android:layout_height="match_parent" android:background="@android:color/white" android:orientation="vertical">
+    <LinearLayout android:layout_width="match_parent" android:layout_height="64dp" android:gravity="center_vertical" android:orientation="horizontal" android:paddingHorizontal="12dp">
+        <TextView android:id="@+id/close_button" android:layout_width="48dp" android:layout_height="48dp" android:gravity="center" android:text="×" android:textColor="#202020" android:textSize="32sp" />
+        <TextView android:layout_width="0dp" android:layout_height="wrap_content" android:layout_weight="1" android:gravity="center" android:text="Post" android:textColor="#202020" android:textSize="17sp" android:textStyle="bold" />
+        <TextView android:layout_width="48dp" android:layout_height="48dp" android:gravity="center" android:text="•••" android:textColor="#202020" android:textSize="18sp" />
+    </LinearLayout>
+    <tj.app.testproject.PhotoArtworkView android:id="@+id/detail_hero" android:layout_width="match_parent" android:layout_height="360dp" android:contentDescription="Selected photo" />
+    <LinearLayout android:layout_width="match_parent" android:layout_height="wrap_content" android:orientation="vertical" android:padding="20dp">
+        <TextView android:layout_width="match_parent" android:layout_height="wrap_content" android:text="♡   ◯   ⤴" android:textColor="#171717" android:textSize="28sp" />
+        <TextView android:id="@+id/detail_title" android:layout_width="match_parent" android:layout_height="wrap_content" android:layout_marginTop="18dp" android:textColor="#171717" android:textSize="18sp" android:textStyle="bold" />
+        <TextView android:layout_width="match_parent" android:layout_height="wrap_content" android:layout_marginTop="8dp" android:text="The same reusable controller works from carousel, grid and list images." android:textColor="#5C5C5C" android:textSize="15sp" />
+        <TextView android:layout_width="match_parent" android:layout_height="wrap_content" android:layout_marginTop="24dp" android:text="Drag horizontally to dismiss" android:textColor="#8A8A8A" android:textSize="13sp" />
+    </LinearLayout>
+</LinearLayout>

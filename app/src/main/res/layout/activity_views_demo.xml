@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="utf-8"?>
+<FrameLayout xmlns:android="http://schemas.android.com/apk/res/android" android:id="@+id/shared_frame_host" android:layout_width="match_parent" android:layout_height="match_parent" android:background="#FAFAFA">
+    <LinearLayout android:id="@+id/source_screen" android:layout_width="match_parent" android:layout_height="match_parent" android:orientation="vertical">
+        <LinearLayout android:layout_width="match_parent" android:layout_height="64dp" android:gravity="center_vertical" android:orientation="horizontal" android:paddingHorizontal="20dp">
+            <TextView android:layout_width="0dp" android:layout_height="wrap_content" android:layout_weight="1" android:text="Views demo" android:textColor="#171717" android:textSize="24sp" android:textStyle="bold" />
+            <TextView android:layout_width="wrap_content" android:layout_height="wrap_content" android:text="Carousel · Grid · List" android:textColor="#777777" android:textSize="12sp" />
+        </LinearLayout>
+        <ScrollView android:layout_width="match_parent" android:layout_height="0dp" android:layout_weight="1" android:descendantFocusability="blocksDescendants" android:overScrollMode="never" android:saveEnabled="false">
+            <LinearLayout android:id="@+id/feed_content" android:layout_width="match_parent" android:layout_height="wrap_content" android:orientation="vertical" android:paddingBottom="28dp" />
+        </ScrollView>
+    </LinearLayout>
+</FrameLayout>
