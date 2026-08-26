@@ -146,11 +146,11 @@ The `app` module contains equivalent Views and Compose feeds with carousel, grid
 
 ### Views / XML
 
-<video src="https://github.com/user-attachments/assets/8216281b-e31d-4de9-9dd5-c0c51ab62305" controls playsinline></video>
+<video src="https://github.com/user-attachments/assets/79360618-f760-4bdf-8dce-a5058a2d412f" controls playsinline></video>
 
 ### Jetpack Compose
 
-<video src="https://github.com/user-attachments/assets/e745188c-6031-4a8b-be9c-4e27b398cbdd" controls playsinline></video>
+<video src="https://github.com/user-attachments/assets/f90437a4-9624-4620-a808-efde2a5ae52f" controls playsinline></video>
 
 ## Building
 

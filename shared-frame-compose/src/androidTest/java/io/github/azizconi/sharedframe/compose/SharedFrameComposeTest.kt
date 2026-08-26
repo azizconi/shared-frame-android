@@ -38,6 +38,7 @@ import androidx.compose.ui.test.performTouchInput
 import androidx.compose.ui.test.swipe
 import androidx.compose.ui.unit.dp
 import androidx.test.ext.junit.runners.AndroidJUnit4
+import io.github.azizconi.sharedframe.core.ImageTransform
 import io.github.azizconi.sharedframe.core.SharedFrameConfig
 import io.github.azizconi.sharedframe.core.SharedFrameDismissDirection
 import io.github.azizconi.sharedframe.core.SharedFrameMath
@@ -106,6 +107,85 @@ class SharedFrameComposeTest {
         compose.runOnIdle { assertTrue("source must be registered after the first close", controller.open(KEY)) }
         advanceUntil { controller.phase == SharedFramePhase.Idle }
         assertEquals(SharedFramePhase.Idle, controller.phase)
+    }
+
+    @Test
+    fun draggedCloseKeepsReleaseFrameAndHandsOffAtTheExactSourceFrame() {
+        lateinit var controller: SharedFrameComposeController
+        val painter = PatternPainter()
+        compose.mainClock.autoAdvance = false
+        compose.setContent {
+            controller = rememberSharedFrameController()
+            TestHost(controller, painter, remember { mutableStateOf(true) })
+        }
+        compose.mainClock.advanceTimeByFrame()
+        compose.waitForIdle()
+        val sourceVisible = compose.onNodeWithTag(HOST).captureToImage()
+
+        compose.runOnIdle { assertTrue(controller.open(KEY)) }
+        advanceUntil { controller.phase == SharedFramePhase.Idle }
+        val baseline = checkNotNull(controller.preparedFrames())
+        compose.runOnIdle {
+            assertTrue(controller.beginDrag())
+            controller.updateDrag(-190f, 28f, SharedFrameDismissDirection.Left)
+        }
+        val dragRender = controller.renderState()
+        val visibleAtRelease = checkNotNull(
+            SharedFrameMath.imageTransformInScreen(
+                baseline.detailImageLocal,
+                baseline.parent,
+                baseline.hero,
+                dragRender.transform,
+            )
+        )
+        val draggedPixels = compose.onNodeWithTag(HOST).captureToImage()
+
+        compose.runOnIdle { controller.finishDrag() }
+        advanceUntil {
+            controller.phase == SharedFramePhase.Closing && controller.renderState().image != null
+        }
+        val closingStart = controller.renderState()
+        assertEquals(dragRender.transform.scale, closingStart.transform.scale, .001f)
+        assertEquals(dragRender.transform.translationX, closingStart.transform.translationX, .001f)
+        assertEquals(dragRender.transform.translationY, closingStart.transform.translationY, .001f)
+        assertImageTransform(
+            visibleAtRelease,
+            checkNotNull(
+                SharedFrameMath.imageTransformInScreen(
+                    checkNotNull(closingStart.image),
+                    baseline.parent,
+                    baseline.hero,
+                    closingStart.transform,
+                )
+            ),
+        )
+        assertImagesClose(draggedPixels, compose.onNodeWithTag(HOST).captureToImage(), .012f)
+
+        advanceUntil {
+            val render = controller.renderState()
+            controller.phase == SharedFramePhase.Closing &&
+                abs(render.transform.scale - baseline.geometry.collapsedTransform.scale) < .001f &&
+                abs(render.transform.translationX - baseline.geometry.collapsedTransform.translationX) < .001f &&
+                abs(render.transform.translationY - baseline.geometry.collapsedTransform.translationY) < .001f
+        }
+        val closingEnd = controller.renderState()
+        assertNotNull(closingEnd.hiddenSourceToken)
+        assertImageTransform(
+            baseline.sourceImageScreen,
+            checkNotNull(
+                SharedFrameMath.imageTransformInScreen(
+                    checkNotNull(closingEnd.image),
+                    baseline.parent,
+                    baseline.hero,
+                    closingEnd.transform,
+                )
+            ),
+        )
+        val exactHandoff = compose.onNodeWithTag(HOST).captureToImage()
+        assertImagesClose(sourceVisible, exactHandoff, .02f)
+
+        advanceUntil { controller.phase == SharedFramePhase.Hidden }
+        assertImagesClose(exactHandoff, compose.onNodeWithTag(HOST).captureToImage(), .02f)
     }
 
     @Test
@@ -253,6 +333,12 @@ class SharedFrameComposeTest {
             }
         }
         assertTrue("closing fraction 0 must match idle; changed $different / $samples samples", different.toFloat() / samples <= maxDifferentFraction)
+    }
+
+    private fun assertImageTransform(expected: ImageTransform, actual: ImageTransform) {
+        assertEquals(expected.scale, actual.scale, .001f)
+        assertEquals(expected.translationX, actual.translationX, .001f)
+        assertEquals(expected.translationY, actual.translationY, .001f)
     }
 
     private fun Rect.relativeTo(parent: Rect) = translate(Offset(-parent.left, -parent.top))

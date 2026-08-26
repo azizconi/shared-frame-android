@@ -652,8 +652,13 @@ private suspend fun runClosing(
     val (hostCoordinates, detail) = controller.awaitReady(operation.sessionId)
     if (!controller.isCurrentOperation(operation.id)) return
 
+    val baseline = controller.preparedFrames()
     val source = controller.currentSource(active.key)
-    val prepared = source?.let { prepareFrames(hostCoordinates, detail, it) }
+    val prepared = if (baseline != null && detail.coordinates.isAttached) {
+        source?.let { prepareClosingFrames(hostCoordinates, baseline, it) }
+    } else {
+        null
+    }
     if (prepared == null || !prepared.sourceFrame.intersects(prepared.parent)) {
         runFadeClose(controller, operation)
         return
@@ -722,6 +727,8 @@ private suspend fun runClosing(
             ),
         )
     }
+    withFrameNanos { }
+    if (!controller.isCurrentOperation(operation.id)) return
     controller.finishClose(operation.id)
 }
 
@@ -803,6 +810,50 @@ private fun prepareFrames(
         sourceFrame.top + sourceLocal.translationY,
     )
     return PreparedFrames(source, sourceFrame, parent, heroFrame, geometry, sourceScreen, detailLocal)
+}
+
+private fun prepareClosingFrames(
+    hostCoordinates: LayoutCoordinates,
+    baseline: PreparedFrames,
+    source: SourceRegistration,
+): PreparedFrames? {
+    if (!hostCoordinates.isAttached || !source.coordinates.isAttached) return null
+    val parent = hostCoordinates.hostFrame() ?: return null
+    if (!parent.approximatelyEquals(baseline.parent)) return null
+
+    val sourceFrame = hostCoordinates.localBoundingBoxOf(source.coordinates, clipBounds = false).toCoreFrame()
+    val geometry = SharedFrameMath.buildGeometry(sourceFrame, baseline.parent, baseline.hero) ?: return null
+    val baselineIntrinsic = baseline.source.painter.intrinsicSize
+    val currentIntrinsic = source.painter.intrinsicSize
+    if (!baselineIntrinsic.width.isFinite() || !baselineIntrinsic.height.isFinite() ||
+        baselineIntrinsic.width <= 0f || baselineIntrinsic.height <= 0f ||
+        !currentIntrinsic.width.isFinite() || !currentIntrinsic.height.isFinite() ||
+        currentIntrinsic.width <= 0f || currentIntrinsic.height <= 0f ||
+        kotlin.math.abs(baselineIntrinsic.width - currentIntrinsic.width) > .5f ||
+        kotlin.math.abs(baselineIntrinsic.height - currentIntrinsic.height) > .5f
+    ) return null
+
+    val sourceLocal = imageTransform(
+        source.contentScale,
+        baselineIntrinsic.width,
+        baselineIntrinsic.height,
+        sourceFrame.width,
+        sourceFrame.height,
+    ) ?: return null
+    val sourceScreen = ImageTransform(
+        sourceLocal.scale,
+        sourceFrame.left + sourceLocal.translationX,
+        sourceFrame.top + sourceLocal.translationY,
+    )
+    return PreparedFrames(
+        source = source,
+        sourceFrame = sourceFrame,
+        parent = baseline.parent,
+        hero = baseline.hero,
+        geometry = geometry,
+        sourceImageScreen = sourceScreen,
+        detailImageLocal = baseline.detailImageLocal,
+    )
 }
 
 private fun imageTransform(
@@ -971,4 +1022,9 @@ private fun LayoutCoordinates.hostFrame(): Frame? {
 private fun Dp.toPx(density: Density): Float = with(density) { toPx() }
 private fun Rect.toCoreFrame() = Frame(left, top, right, bottom)
 private fun Frame.intersects(other: Frame) = right > other.left && left < other.right && bottom > other.top && top < other.bottom
+private fun Frame.approximatelyEquals(other: Frame, tolerance: Float = .5f): Boolean =
+    abs(left - other.left) <= tolerance &&
+        abs(top - other.top) <= tolerance &&
+        abs(right - other.right) <= tolerance &&
+        abs(bottom - other.bottom) <= tolerance
 private fun lerp(start: Float, end: Float, fraction: Float) = start + (end - start) * fraction

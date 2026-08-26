@@ -14,6 +14,7 @@ import android.view.ViewTreeObserver
 import android.view.animation.PathInterpolator
 import android.widget.FrameLayout
 import android.widget.ImageView
+import androidx.core.animation.doOnCancel
 import androidx.core.animation.doOnEnd
 import io.github.azizconi.sharedframe.core.Frame
 import io.github.azizconi.sharedframe.core.ImageTransform
@@ -37,6 +38,16 @@ data class SharedFrameViewRequest(
     val onHidden: () -> Unit = {},
 )
 
+internal data class SharedFrameViewRenderSnapshot(
+    val transform: UniformTransform,
+    val imageLocal: ImageTransform?,
+    val parent: Frame?,
+    val hero: Frame?,
+    val detailImageLocal: ImageTransform?,
+    val sourceImageScreen: ImageTransform?,
+    val collapsedTransform: UniformTransform?,
+)
+
 class SharedFrameViewController(
     private val host: FrameLayout,
     val config: SharedFrameConfig = SharedFrameConfig(),
@@ -46,6 +57,21 @@ class SharedFrameViewController(
         val endInScreen: ImageTransform,
         val parentFrame: Frame,
         val heroFrame: Frame,
+    )
+
+    private data class PreparedFrames(
+        val parent: Frame,
+        val hero: Frame,
+        val geometry: SharedFrameGeometry,
+        val sourceImageScreen: ImageTransform,
+        val detailImageLocal: ImageTransform,
+        val intrinsicWidth: Int,
+        val intrinsicHeight: Int,
+    )
+
+    private data class ClosingFrames(
+        val geometry: SharedFrameGeometry,
+        val image: ImageTransition,
     )
 
     private val stateMachine = SharedFrameStateMachine()
@@ -62,11 +88,12 @@ class SharedFrameViewController(
         visibility = View.GONE
     }
     private var request: SharedFrameViewRequest? = null
-    private var geometry: SharedFrameGeometry? = null
+    private var preparedFrames: PreparedFrames? = null
     private var animator: ValueAnimator? = null
     private var preDrawObserver: ViewTreeObserver? = null
     private var preDrawListener: ViewTreeObserver.OnPreDrawListener? = null
     private var startRunnable: Runnable? = null
+    private var handoffRunnable: Runnable? = null
 
     private var velocityTracker: VelocityTracker? = null
     private var downX = 0f
@@ -93,6 +120,7 @@ class SharedFrameViewController(
     fun open(newRequest: SharedFrameViewRequest): Boolean {
         if (!newRequest.sourceHero.isAttachedToWindow || !stateMachine.beginOpen()) return false
         clearPendingOpen()
+        preparedFrames = null
         request = newRequest
         attachDetail(newRequest.detailRoot)
         newRequest.detailHero.scaleType = ImageView.ScaleType.CENTER_CROP
@@ -105,13 +133,14 @@ class SharedFrameViewController(
         val listener = ViewTreeObserver.OnPreDrawListener {
             clearPreDraw()
             if (phase != SharedFramePhase.Opening || request !== newRequest) return@OnPreDrawListener true
-            val calculated = buildGeometry(newRequest)
-            val image = buildOpeningImageTransition(newRequest)
-            if (calculated == null || image == null) {
+            val prepared = prepareOpeningFrames(newRequest)
+            val image = prepared?.let(::buildOpeningImageTransition)
+            if (prepared == null || image == null) {
                 showExpandedImmediately()
                 return@OnPreDrawListener true
             }
-            geometry = calculated
+            preparedFrames = prepared
+            val calculated = prepared.geometry
             val radius = newRequest.sourceRadiusPx / calculated.collapsedTransform.scale
             newRequest.detailHero.scaleType = ImageView.ScaleType.MATRIX
             applyImageTransition(image, calculated.collapsedTransform, 0f)
@@ -152,13 +181,12 @@ class SharedFrameViewController(
             fadeClose()
             return true
         }
-        val calculated = buildGeometry(active)
-        val image = buildClosingImageTransition(active, UniformTransform.Identity)
-        if (calculated == null || image == null) {
+        val closing = prepareClosingFrames(active, UniformTransform.Identity)
+        if (closing == null) {
             fadeClose()
             return true
         }
-        geometry = calculated
+        val calculated = closing.geometry
         animate(
             UniformTransform.Identity,
             calculated.collapsedTransform,
@@ -168,13 +196,27 @@ class SharedFrameViewController(
             active.sourceRadiusPx / calculated.collapsedTransform.scale,
             config.scrimAlpha,
             0f,
-            image,
-            onEnd = ::hide,
+            closing.image,
+            restoreHeroOnEnd = false,
+            onEnd = ::scheduleSharedCloseHandoff,
         )
         return true
     }
 
     fun handleBack(): Boolean = if (phase == SharedFramePhase.Idle) close() else phase != SharedFramePhase.Hidden
+
+    internal fun renderSnapshot(): SharedFrameViewRenderSnapshot {
+        val prepared = preparedFrames
+        return SharedFrameViewRenderSnapshot(
+            transform = UniformTransform(overlay.scaleX, overlay.translationX, overlay.translationY),
+            imageLocal = request?.detailHero?.imageTransform(),
+            parent = prepared?.parent,
+            hero = prepared?.hero,
+            detailImageLocal = prepared?.detailImageLocal,
+            sourceImageScreen = prepared?.sourceImageScreen,
+            collapsedTransform = prepared?.geometry?.collapsedTransform,
+        )
+    }
 
     fun dispose() {
         clearPendingOpen()
@@ -201,6 +243,7 @@ class SharedFrameViewController(
 
     private fun showExpandedImmediately() {
         clearPendingOpen()
+        preparedFrames = null
         val active = request ?: return
         active.sourceHero.alpha = 0f
         active.detailHero.scaleType = ImageView.ScaleType.CENTER_CROP
@@ -210,12 +253,6 @@ class SharedFrameViewController(
         stateMachine.finishOpen()
         active.onShown()
     }
-
-    private fun buildGeometry(active: SharedFrameViewRequest) = SharedFrameMath.buildGeometry(
-        active.sourceHero.frameRelativeTo(host),
-        overlay.frameRelativeTo(host),
-        active.detailHero.frameRelativeTo(host),
-    )
 
     private fun handleInterceptTouch(event: MotionEvent): Boolean {
         when (event.actionMasked) {
@@ -306,7 +343,8 @@ class SharedFrameViewController(
         val resolved = SharedFrameMath.resolveDismissDirection(totalX, totalY, touchSlop, allowed) ?: return
         if (!stateMachine.beginDrag()) return
         dragDirection = resolved
-        overlay.maskFrame = (geometry?.expandedMask ?: Frame(0f, 0f, overlay.width.toFloat(), overlay.height.toFloat())).toRectF()
+        overlay.maskFrame = (preparedFrames?.geometry?.expandedMask
+            ?: Frame(0f, 0f, overlay.width.toFloat(), overlay.height.toFloat())).toRectF()
         overlay.maskRadius = 0f
         scrim.alpha = config.scrimAlpha
     }
@@ -369,7 +407,8 @@ class SharedFrameViewController(
 
     private fun cancelDrag() {
         if (!stateMachine.cancelDrag()) return
-        val expanded = geometry?.expandedMask ?: Frame(0f, 0f, overlay.width.toFloat(), overlay.height.toFloat())
+        val expanded = preparedFrames?.geometry?.expandedMask
+            ?: Frame(0f, 0f, overlay.width.toFloat(), overlay.height.toFloat())
         animate(
             lastDragTransform, UniformTransform.Identity,
             expanded, expanded,
@@ -382,15 +421,15 @@ class SharedFrameViewController(
         if (!stateMachine.beginClose()) return
         if (!sourceIsAvailable(active)) return fadeClose()
         val current = lastDragTransform
-        val calculated = buildGeometry(active) ?: return fadeClose()
-        val image = buildClosingImageTransition(active, current) ?: return fadeClose()
-        geometry = calculated
+        val closing = prepareClosingFrames(active, current) ?: return fadeClose()
+        val calculated = closing.geometry
         animate(
             current, calculated.collapsedTransform,
             calculated.expandedMask, calculated.collapsedMask,
             0f, active.sourceRadiusPx / calculated.collapsedTransform.scale,
-            config.scrimAlpha, 0f, image,
-            onEnd = ::hide,
+            config.scrimAlpha, 0f, closing.image,
+            restoreHeroOnEnd = false,
+            onEnd = ::scheduleSharedCloseHandoff,
         )
     }
 
@@ -404,6 +443,7 @@ class SharedFrameViewController(
         fromScrim: Float,
         toScrim: Float,
         image: ImageTransition? = null,
+        restoreHeroOnEnd: Boolean = true,
         onEnd: () -> Unit,
     ) {
         animator?.cancel()
@@ -413,6 +453,7 @@ class SharedFrameViewController(
             applyImageTransition(image, fromTransform, 0f)
         }
         animator = ValueAnimator.ofFloat(0f, 1f).apply {
+            var wasCancelled = false
             duration = config.durationMillis
             val e = config.easing
             interpolator = PathInterpolator(e.x1, e.y1, e.x2, e.y2)
@@ -422,8 +463,10 @@ class SharedFrameViewController(
                 applyFrame(transform, SharedFrameMath.lerp(fromMask, toMask, t), lerp(fromRadius, toRadius, t), lerp(fromScrim, toScrim, t))
                 if (image != null) applyImageTransition(image, transform, t)
             }
+            doOnCancel { wasCancelled = true }
             doOnEnd {
-                hero?.scaleType = ImageView.ScaleType.CENTER_CROP
+                if (wasCancelled) return@doOnEnd
+                if (restoreHeroOnEnd) hero?.scaleType = ImageView.ScaleType.CENTER_CROP
                 animator = null
                 onEnd()
             }
@@ -436,15 +479,32 @@ class SharedFrameViewController(
         val startScrim = scrim.alpha
         animator?.cancel()
         animator = ValueAnimator.ofFloat(0f, 1f).apply {
+            var wasCancelled = false
             duration = config.durationMillis
             addUpdateListener {
                 val t = it.animatedFraction
                 overlay.alpha = startOverlay * (1f - t)
                 scrim.alpha = startScrim * (1f - t)
             }
-            doOnEnd { animator = null; hide() }
+            doOnCancel { wasCancelled = true }
+            doOnEnd {
+                if (wasCancelled) return@doOnEnd
+                animator = null
+                hide()
+            }
             start()
         }
+    }
+
+    private fun scheduleSharedCloseHandoff() {
+        val active = request ?: return hide()
+        val runnable = Runnable {
+            handoffRunnable = null
+            if (request !== active || phase != SharedFramePhase.Closing) return@Runnable
+            hide()
+        }
+        handoffRunnable = runnable
+        overlay.postOnAnimation(runnable)
     }
 
     private fun hide() {
@@ -456,37 +516,78 @@ class SharedFrameViewController(
         scrim.apply { visibility = View.GONE; alpha = 0f }
         active?.sourceHero?.alpha = 1f
         request = null
-        geometry = null
+        preparedFrames = null
         stateMachine.finishClose()
         active?.onHidden?.invoke()
     }
 
-    private fun buildOpeningImageTransition(active: SharedFrameViewRequest): ImageTransition? {
-        val frames = imageFrames(active) ?: return null
-        val detailScreen = SharedFrameMath.imageTransformInScreen(frames.detailLocal, frames.parent, frames.hero, UniformTransform.Identity) ?: return null
-        return ImageTransition(frames.sourceScreen, detailScreen, frames.parent, frames.hero)
+    private fun buildOpeningImageTransition(frames: PreparedFrames): ImageTransition? {
+        val detailScreen = SharedFrameMath.imageTransformInScreen(
+            frames.detailImageLocal,
+            frames.parent,
+            frames.hero,
+            UniformTransform.Identity,
+        ) ?: return null
+        return ImageTransition(frames.sourceImageScreen, detailScreen, frames.parent, frames.hero)
     }
 
-    private fun buildClosingImageTransition(active: SharedFrameViewRequest, parentTransform: UniformTransform): ImageTransition? {
-        val frames = imageFrames(active) ?: return null
-        val detailScreen = SharedFrameMath.imageTransformInScreen(frames.detailLocal, frames.parent, frames.hero, parentTransform) ?: return null
-        return ImageTransition(detailScreen, frames.sourceScreen, frames.parent, frames.hero)
-    }
-
-    private data class ImageFrames(val sourceScreen: ImageTransform, val detailLocal: ImageTransform, val parent: Frame, val hero: Frame)
-
-    private fun imageFrames(active: SharedFrameViewRequest): ImageFrames? {
+    private fun prepareOpeningFrames(active: SharedFrameViewRequest): PreparedFrames? {
         val sourceDrawable = active.sourceHero.drawable ?: return null
         val detailDrawable = active.detailHero.drawable ?: return null
         if (sourceDrawable.intrinsicWidth != detailDrawable.intrinsicWidth || sourceDrawable.intrinsicHeight != detailDrawable.intrinsicHeight) return null
         val sourceLocal = active.sourceHero.imageTransform() ?: return null
         val detailLocal = active.detailHero.imageTransform() ?: return null
         val sourceFrame = active.sourceHero.frameRelativeTo(host)
-        return ImageFrames(
-            ImageTransform(sourceLocal.scale, sourceFrame.left + sourceLocal.translationX, sourceFrame.top + sourceLocal.translationY),
-            detailLocal,
-            overlay.frameRelativeTo(host),
-            active.detailHero.frameRelativeTo(host),
+        val parent = overlay.layoutFrameInHost()
+        val hero = active.detailHero.frameRelativeTo(host)
+        val geometry = SharedFrameMath.buildGeometry(sourceFrame, parent, hero) ?: return null
+        return PreparedFrames(
+            parent = parent,
+            hero = hero,
+            geometry = geometry,
+            sourceImageScreen = ImageTransform(
+                sourceLocal.scale,
+                sourceFrame.left + sourceLocal.translationX,
+                sourceFrame.top + sourceLocal.translationY,
+            ),
+            detailImageLocal = detailLocal,
+            intrinsicWidth = detailDrawable.intrinsicWidth,
+            intrinsicHeight = detailDrawable.intrinsicHeight,
+        )
+    }
+
+    private fun prepareClosingFrames(
+        active: SharedFrameViewRequest,
+        parentTransform: UniformTransform,
+    ): ClosingFrames? {
+        val baseline = preparedFrames ?: return null
+        if (!active.detailHero.isAttachedToWindow ||
+            active.detailHero.width.toFloat() != baseline.hero.width ||
+            active.detailHero.height.toFloat() != baseline.hero.height ||
+            !overlay.layoutFrameInHost().approximatelyEquals(baseline.parent)
+        ) return null
+
+        val sourceDrawable = active.sourceHero.drawable ?: return null
+        if (sourceDrawable.intrinsicWidth != baseline.intrinsicWidth ||
+            sourceDrawable.intrinsicHeight != baseline.intrinsicHeight
+        ) return null
+        val sourceLocal = active.sourceHero.imageTransform() ?: return null
+        val sourceFrame = active.sourceHero.frameRelativeTo(host)
+        val geometry = SharedFrameMath.buildGeometry(sourceFrame, baseline.parent, baseline.hero) ?: return null
+        val sourceImageScreen = ImageTransform(
+            sourceLocal.scale,
+            sourceFrame.left + sourceLocal.translationX,
+            sourceFrame.top + sourceLocal.translationY,
+        )
+        val detailImageScreen = SharedFrameMath.imageTransformInScreen(
+            baseline.detailImageLocal,
+            baseline.parent,
+            baseline.hero,
+            parentTransform,
+        ) ?: return null
+        return ClosingFrames(
+            geometry,
+            ImageTransition(detailImageScreen, sourceImageScreen, baseline.parent, baseline.hero),
         )
     }
 
@@ -516,6 +617,8 @@ class SharedFrameViewController(
         clearPreDraw()
         startRunnable?.let(overlay::removeCallbacks)
         startRunnable = null
+        handoffRunnable?.let(overlay::removeCallbacks)
+        handoffRunnable = null
     }
 
     private fun copyDrawable(drawable: Drawable): Drawable =
@@ -528,6 +631,15 @@ class SharedFrameViewController(
         val top = (viewLocation[1] - rootLocation[1]).toFloat()
         return Frame(left, top, left + width, top + height)
     }
+
+    private fun View.layoutFrameInHost(): Frame =
+        Frame(left.toFloat(), top.toFloat(), right.toFloat(), bottom.toFloat())
+
+    private fun Frame.approximatelyEquals(other: Frame, tolerance: Float = .5f): Boolean =
+        kotlin.math.abs(left - other.left) <= tolerance &&
+            kotlin.math.abs(top - other.top) <= tolerance &&
+            kotlin.math.abs(right - other.right) <= tolerance &&
+            kotlin.math.abs(bottom - other.bottom) <= tolerance
 
     private fun ImageView.imageTransform(): ImageTransform? {
         val values = FloatArray(9); imageMatrix.getValues(values)

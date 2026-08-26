@@ -28,6 +28,56 @@ class SharedFrameCoreTest {
         assertEquals(requested.translationY, mapped.translationY, .001f)
     }
 
+    @Test fun draggedClosingKeepsStableDetailBaselineAndExactSourceEndpoint() {
+        val parent = Frame(0f, 0f, 1080f, 2400f)
+        val hero = Frame(0f, 180f, 1080f, 1125f)
+        val source = Frame(42f, 1570f, 382f, 1910f)
+        val geometry = checkNotNull(SharedFrameMath.buildGeometry(source, parent, hero))
+        val detailLocal = checkNotNull(SharedFrameMath.centerCropTransform(1600f, 900f, hero.width, hero.height))
+        val sourceLocal = checkNotNull(SharedFrameMath.centerCropTransform(1600f, 900f, source.width, source.height))
+        val sourceScreen = ImageTransform(
+            sourceLocal.scale,
+            source.left + sourceLocal.translationX,
+            source.top + sourceLocal.translationY,
+        )
+        val dragTransforms = listOf(
+            UniformTransform(.82f, -240f, 35f),
+            UniformTransform(.82f, 240f, 35f),
+            UniformTransform(.82f, 35f, 280f),
+        )
+
+        dragTransforms.forEach { dragged ->
+            val visibleAtRelease = checkNotNull(
+                SharedFrameMath.imageTransformInScreen(detailLocal, parent, hero, dragged)
+            )
+            val closingStart = checkNotNull(
+                SharedFrameMath.localImageTransformForScreen(visibleAtRelease, parent, hero, dragged)
+            )
+            val remappedStart = checkNotNull(
+                SharedFrameMath.imageTransformInScreen(closingStart, parent, hero, dragged)
+            )
+            val closingEnd = checkNotNull(
+                SharedFrameMath.localImageTransformForScreen(
+                    sourceScreen,
+                    parent,
+                    hero,
+                    geometry.collapsedTransform,
+                )
+            )
+            val remappedEnd = checkNotNull(
+                SharedFrameMath.imageTransformInScreen(
+                    closingEnd,
+                    parent,
+                    hero,
+                    geometry.collapsedTransform,
+                )
+            )
+
+            assertImageTransform(visibleAtRelease, remappedStart)
+            assertImageTransform(sourceScreen, remappedEnd)
+        }
+    }
+
     @Test fun cropToFitInterpolationKeepsExactEndpointsAndFiniteMiddle() {
         val crop = checkNotNull(SharedFrameMath.centerCropTransform(1600f, 900f, 320f, 480f))
         val fit = checkNotNull(SharedFrameMath.centerFitTransform(1600f, 900f, 1080f, 720f))
@@ -115,5 +165,11 @@ class SharedFrameCoreTest {
         assertEquals(expected.top, actual.top, .001f)
         assertEquals(expected.right, actual.right, .001f)
         assertEquals(expected.bottom, actual.bottom, .001f)
+    }
+
+    private fun assertImageTransform(expected: ImageTransform, actual: ImageTransform) {
+        assertEquals(expected.scale, actual.scale, .001f)
+        assertEquals(expected.translationX, actual.translationX, .001f)
+        assertEquals(expected.translationY, actual.translationY, .001f)
     }
 }
