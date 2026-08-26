@@ -8,7 +8,9 @@ import android.os.Bundle
 import android.os.SystemClock
 import android.view.MotionEvent
 import android.widget.FrameLayout
+import android.widget.HorizontalScrollView
 import android.widget.ImageView
+import android.widget.ScrollView
 import androidx.test.core.app.ActivityScenario
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.platform.app.InstrumentationRegistry
@@ -146,6 +148,93 @@ class SharedFrameViewControllerTest {
             sendSwipe(centerX, centerY, centerX + 5f, centerY + 260f, 500)
             waitForPhase(controller, SharedFramePhase.Hidden)
             scenario.onActivity { controller.dispose() }
+        }
+    }
+
+    @Test
+    fun activeOverlayKeepsBackgroundScrollViewsStationary() {
+        ActivityScenario.launch(SharedFrameTestActivity::class.java).use { scenario ->
+            val shown = CountDownLatch(1)
+            lateinit var controller: SharedFrameViewController
+            lateinit var vertical: ScrollView
+            lateinit var horizontal: HorizontalScrollView
+            var initialScrollX = 0
+            var initialScrollY = 0
+
+            scenario.onActivity { activity ->
+                val bitmap = Bitmap.createBitmap(120, 90, Bitmap.Config.ARGB_8888).apply { eraseColor(Color.GREEN) }
+                val drawable = BitmapDrawable(activity.resources, bitmap)
+                val source = ImageView(activity).apply {
+                    scaleType = ImageView.ScaleType.CENTER_CROP
+                    setImageDrawable(drawable)
+                }
+                val wideContent = FrameLayout(activity).apply {
+                    addView(source, FrameLayout.LayoutParams(240, 180).apply {
+                        leftMargin = 1_000
+                        topMargin = 60
+                    })
+                }
+                horizontal = HorizontalScrollView(activity).apply {
+                    isHorizontalScrollBarEnabled = false
+                    addView(wideContent, FrameLayout.LayoutParams(4_000, 320))
+                }
+                val tallContent = FrameLayout(activity).apply {
+                    minimumHeight = 8_000
+                    addView(horizontal, FrameLayout.LayoutParams(FrameLayout.LayoutParams.MATCH_PARENT, 320).apply {
+                        topMargin = 2_000
+                    })
+                }
+                vertical = ScrollView(activity).apply {
+                    isVerticalScrollBarEnabled = false
+                    addView(tallContent, FrameLayout.LayoutParams(FrameLayout.LayoutParams.MATCH_PARENT, 8_000))
+                }
+                activity.host.addView(
+                    vertical,
+                    FrameLayout.LayoutParams(FrameLayout.LayoutParams.MATCH_PARENT, FrameLayout.LayoutParams.MATCH_PARENT),
+                )
+
+                val detail = FrameLayout(activity)
+                val hero = ImageView(activity).apply { scaleType = ImageView.ScaleType.CENTER_CROP }
+                detail.addView(hero, FrameLayout.LayoutParams(FrameLayout.LayoutParams.MATCH_PARENT, 720))
+                controller = SharedFrameViewController(activity.host, SharedFrameConfig(durationMillis = 80))
+                activity.host.post {
+                    horizontal.post {
+                        vertical.scrollTo(0, 1_600)
+                        horizontal.scrollTo(800, 0)
+                        horizontal.post {
+                            initialScrollX = horizontal.scrollX
+                            initialScrollY = vertical.scrollY
+                            assertTrue(controller.open(SharedFrameViewRequest(
+                                key = "scroll-shield",
+                                sourceHero = source,
+                                drawable = drawable,
+                                detailRoot = detail,
+                                detailHero = hero,
+                                onShown = { shown.countDown() },
+                            )))
+                        }
+                    }
+                }
+            }
+            assertTrue(shown.await(3, TimeUnit.SECONDS))
+            assertTrue(initialScrollX > 0)
+            assertTrue(initialScrollY > 0)
+
+            val (centerX, centerY) = hostCenter(scenario)
+            sendSwipe(centerX, centerY, centerX + 8f, centerY + 60f, 800)
+            waitForPhase(controller, SharedFramePhase.Idle)
+            scenario.onActivity {
+                assertEquals(initialScrollX, horizontal.scrollX)
+                assertEquals(initialScrollY, vertical.scrollY)
+            }
+
+            sendSwipe(centerX, centerY, centerX - 260f, centerY + 18f, 600)
+            waitForPhase(controller, SharedFramePhase.Hidden)
+            scenario.onActivity {
+                assertEquals(initialScrollX, horizontal.scrollX)
+                assertEquals(initialScrollY, vertical.scrollY)
+                controller.dispose()
+            }
         }
     }
 

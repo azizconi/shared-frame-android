@@ -12,6 +12,12 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.LazyListState
+import androidx.compose.foundation.lazy.LazyRow
+import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.MutableState
@@ -251,6 +257,58 @@ class SharedFrameComposeTest {
     }
 
     @Test
+    fun activeOverlayKeepsBackgroundLazyListsStationaryAndPreservesDetailTaps() {
+        lateinit var controller: SharedFrameComposeController
+        lateinit var verticalState: LazyListState
+        lateinit var horizontalState: LazyListState
+        var detailTaps = 0
+        val painter = PatternPainter()
+        compose.setContent {
+            controller = rememberSharedFrameController(SharedFrameConfig(durationMillis = 80))
+            verticalState = rememberLazyListState(initialFirstVisibleItemIndex = 3, initialFirstVisibleItemScrollOffset = 17)
+            horizontalState = rememberLazyListState(initialFirstVisibleItemIndex = 2, initialFirstVisibleItemScrollOffset = 23)
+            ScrollBlockingTestHost(controller, painter, verticalState, horizontalState) { detailTaps++ }
+        }
+        compose.waitForIdle()
+        val initialVertical = verticalState.firstVisibleItemIndex to verticalState.firstVisibleItemScrollOffset
+        val initialHorizontal = horizontalState.firstVisibleItemIndex to horizontalState.firstVisibleItemScrollOffset
+
+        fun assertBackgroundDidNotMove() {
+            compose.runOnIdle {
+                assertEquals(initialVertical, verticalState.firstVisibleItemIndex to verticalState.firstVisibleItemScrollOffset)
+                assertEquals(initialHorizontal, horizontalState.firstVisibleItemIndex to horizontalState.firstVisibleItemScrollOffset)
+            }
+        }
+
+        fun openDetail() {
+            compose.runOnIdle { assertTrue(controller.open(KEY)) }
+            compose.waitUntil(3_000) { controller.phase == SharedFramePhase.Idle }
+            assertBackgroundDidNotMove()
+        }
+
+        fun dismissBy(offset: Offset) {
+            compose.onNodeWithTag(HOST).performTouchInput { swipe(center, center + offset, 600) }
+            compose.waitUntil(3_000) { controller.phase == SharedFramePhase.Hidden }
+            assertBackgroundDidNotMove()
+        }
+
+        openDetail()
+        compose.onNodeWithTag(DETAIL_ACTION).performClick()
+        compose.runOnIdle { assertEquals(1, detailTaps) }
+        assertBackgroundDidNotMove()
+
+        compose.onNodeWithTag(HOST).performTouchInput { swipe(center, center + Offset(8f, 60f), 800) }
+        compose.waitUntil(3_000) { controller.phase == SharedFramePhase.Idle }
+        assertBackgroundDidNotMove()
+
+        dismissBy(Offset(-220f, 18f))
+        openDetail()
+        dismissBy(Offset(220f, 18f))
+        openDetail()
+        dismissBy(Offset(18f, 220f))
+    }
+
+    @Test
     fun missingSourceUsesFadeInsteadOfRemovingDetailImmediately() {
         lateinit var controller: SharedFrameComposeController
         val sourceVisible = mutableStateOf(true)
@@ -355,6 +413,81 @@ class SharedFrameComposeTest {
         private const val SOURCE = "source"
         private const val HEADER = "header"
         private const val DETAIL = "detail"
+        private const val DETAIL_ACTION = "detail_action"
+    }
+}
+
+@Composable
+private fun ScrollBlockingTestHost(
+    controller: SharedFrameComposeController,
+    painter: Painter,
+    verticalState: LazyListState,
+    horizontalState: LazyListState,
+    onDetailTap: () -> Unit,
+) {
+    SharedFrameHost(
+        controller = controller,
+        modifier = Modifier.fillMaxSize().background(Color.White).testTag("host"),
+        detailContent = {
+            Column(Modifier.fillMaxSize().background(Color.White)) {
+                Box(
+                    Modifier
+                        .fillMaxWidth()
+                        .height(64.dp)
+                        .background(Color(0xFF00BCD4))
+                        .clickable(onClick = onDetailTap)
+                        .testTag("detail_action")
+                )
+                Image(
+                    painter = painter,
+                    contentDescription = "detail hero",
+                    contentScale = ContentScale.Crop,
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .height(240.dp)
+                        .sharedFrameDetailHero(ContentScale.Crop),
+                )
+            }
+        },
+    ) {
+        Column(Modifier.fillMaxSize()) {
+            LazyRow(
+                state = horizontalState,
+                modifier = Modifier.fillMaxWidth().height(120.dp),
+            ) {
+                items((0 until 20).toList()) { index ->
+                    Box(
+                        Modifier
+                            .width(96.dp)
+                            .height(120.dp)
+                            .background(if (index % 2 == 0) Color.LightGray else Color.DarkGray)
+                    )
+                }
+            }
+            LazyColumn(
+                state = verticalState,
+                modifier = Modifier.fillMaxSize(),
+            ) {
+                items((0 until 30).toList()) { index ->
+                    Box(
+                        Modifier
+                            .fillMaxWidth()
+                            .height(72.dp)
+                            .background(if (index % 2 == 0) Color(0xFFE8E8E8) else Color.White)
+                    )
+                }
+            }
+        }
+        Image(
+            painter = painter,
+            contentDescription = "source hero",
+            contentScale = ContentScale.Crop,
+            modifier = Modifier
+                .offset(180.dp, 180.dp)
+                .size(120.dp, 160.dp)
+                .sharedFrameSource(controller, "photo", painter, ContentScale.Crop, 12.dp)
+                .clickable { controller.open("photo") },
+        )
     }
 }
 

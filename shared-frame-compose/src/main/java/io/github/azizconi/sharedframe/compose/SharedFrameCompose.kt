@@ -443,34 +443,36 @@ fun SharedFrameHost(
         }
     }
 
-    Box(
-        modifier
-            .onGloballyPositioned(controller::registerHost)
-            .sharedFrameDrag(controller, active?.id, currentCanStartDismiss)
-    ) {
+    Box(modifier.onGloballyPositioned(controller::registerHost)) {
         content()
         if (active != null && controller.phase != SharedFramePhase.Hidden) {
             Box(
-                Modifier.fillMaxSize().drawBehind {
-                    drawRect(Color.Black.copy(alpha = controller.renderState().scrimAlpha))
-                }
-            )
-            val detailModifier = Modifier
-                .fillMaxSize()
-                .graphicsLayer {
-                    val render = controller.renderState()
-                    val transform = render.transform
-                    scaleX = transform.scale
-                    scaleY = transform.scale
-                    translationX = transform.translationX
-                    translationY = transform.translationY
-                    transformOrigin = TransformOrigin.Center
-                    alpha = if (render.prepared) render.detailAlpha else 0f
-                }
-                .drawWithSharedFrameMask(controller)
+                Modifier
+                    .fillMaxSize()
+                    .sharedFrameDrag(controller, active.id, currentCanStartDismiss)
+            ) {
+                Box(
+                    Modifier.fillMaxSize().drawBehind {
+                        drawRect(Color.Black.copy(alpha = controller.renderState().scrimAlpha))
+                    }
+                )
+                val detailModifier = Modifier
+                    .fillMaxSize()
+                    .graphicsLayer {
+                        val render = controller.renderState()
+                        val transform = render.transform
+                        scaleX = transform.scale
+                        scaleY = transform.scale
+                        translationX = transform.translationX
+                        translationY = transform.translationY
+                        transformOrigin = TransformOrigin.Center
+                        alpha = if (render.prepared) render.detailAlpha else 0f
+                    }
+                    .drawWithSharedFrameMask(controller)
 
-            Box(detailModifier) {
-                SharedFrameDetailScope(controller, active.id, active.key, active.painter).detailContent()
+                Box(detailModifier) {
+                    SharedFrameDetailScope(controller, active.id, active.key, active.painter).detailContent()
+                }
             }
         }
     }
