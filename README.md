@@ -10,7 +10,7 @@ SharedFrame expands a loaded image from any carousel, grid, list, or custom layo
 
 - Views/XML and Jetpack Compose adapters with matching behavior
 - Atomic first frame without a full-screen flash
-- Continuous `CENTER_CROP` interpolation across different aspect ratios
+- Continuous `Crop` and `Fit` interpolation across different aspect ratios
 - Rightward interactive dismiss, cancel, and velocity/distance completion
 - Fade fallback when a recycled source is no longer on screen
 - Image-loader agnostic library modules
@@ -18,7 +18,9 @@ SharedFrame expands a loaded image from any carousel, grid, list, or custom layo
 
 ## Installation
 
-Add Maven Central and choose the adapter for your UI stack:
+`0.1.0-alpha01` is the first release candidate. Until the Maven Central signing
+secrets are configured, clone the repository and include the required modules in
+your Gradle build. After publication, choose the adapter for your UI stack:
 
 ```kotlin
 repositories {
@@ -86,7 +88,7 @@ SharedFrameHost(
                 modifier = Modifier
                     .fillMaxWidth()
                     .height(360.dp)
-                    .sharedFrameDetailHero(),
+                    .sharedFrameDetailHero(ContentScale.Crop),
             )
         }
     },
@@ -108,7 +110,7 @@ SharedFrameHost(
 }
 ```
 
-The source modifier must receive a painter with a finite intrinsic size. Register it after the loader reports success.
+The source modifier must receive a painter with a finite intrinsic size. Register it after the loader reports success. Pass the actual, independent `ContentScale` to both source and detail registration. The first preview deliberately supports `ContentScale.Crop` and `ContentScale.Fit`; unsupported non-uniform scales fail fast instead of producing a broken morph.
 
 ## Default motion
 

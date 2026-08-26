@@ -31,7 +31,7 @@ fun GalleryScreen(photoPainter: Painter) {
                     modifier = Modifier
                         .fillMaxWidth()
                         .height(420.dp)
-                        .sharedFrameDetailHero(),
+                        .sharedFrameDetailHero(ContentScale.Crop),
                 )
                 Button(
                     onClick = controller::close,
@@ -90,7 +90,7 @@ Modifier.sharedFrameSource(
 ```
 
 - `painter` должен иметь конечный положительный `intrinsicSize`, иначе невозможно рассчитать переход изображения.
-- Реализация различает `ContentScale.Fit` и остальные значения: `Fit` считается aspect fit, остальные — aspect fill.
+- Поддерживаются точные `ContentScale.Crop` и `ContentScale.Fit`. Остальные значения отклоняются сразу, поскольку требуют другой модели matrix.
 - `cornerRadius` описывает радиус исходного элемента и во время открытия плавно уменьшается до нуля.
 - При удалении composable из композиции источник автоматически снимается с регистрации.
 
@@ -100,9 +100,9 @@ Host отображает обычный `content`, scrim и активный `d
 
 - `key` — ключ активного источника;
 - `painter` — тот же painter, который был зарегистрирован у источника;
-- `Modifier.sharedFrameDetailHero()` — отметку целевой области изображения.
+- `Modifier.sharedFrameDetailHero(contentScale)` — отметку целевой области и её независимый crop/fit.
 
-В `detailContent` должна быть ровно одна актуальная hero-область. Она обязана получить ненулевой размер после layout.
+В `detailContent` должна быть ровно одна актуальная hero-область. Она обязана получить ненулевой размер после layout и использовать тот же `ContentScale`, который передан в `sharedFrameDetailHero`.
 
 ### Управление
 

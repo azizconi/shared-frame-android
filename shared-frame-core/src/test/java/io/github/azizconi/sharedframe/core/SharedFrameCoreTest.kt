@@ -28,6 +28,14 @@ class SharedFrameCoreTest {
         assertEquals(requested.translationY, mapped.translationY, .001f)
     }
 
+    @Test fun cropToFitInterpolationKeepsExactEndpointsAndFiniteMiddle() {
+        val crop = checkNotNull(SharedFrameMath.centerCropTransform(1600f, 900f, 320f, 480f))
+        val fit = checkNotNull(SharedFrameMath.centerFitTransform(1600f, 900f, 1080f, 720f))
+        assertEquals(crop, SharedFrameMath.lerp(crop, fit, 0f))
+        assertEquals(fit, SharedFrameMath.lerp(crop, fit, 1f))
+        assertTrue(SharedFrameMath.lerp(crop, fit, .5f).isUsable())
+    }
+
     @Test fun dragAndDismissUseConfiguredDirection() {
         assertEquals(1f, SharedFrameMath.dragTransform(-300f, 20f, 1000f).scale, .001f)
         assertEquals(.6f, SharedFrameMath.dragTransform(1200f, 20f, 1000f).scale, .001f)

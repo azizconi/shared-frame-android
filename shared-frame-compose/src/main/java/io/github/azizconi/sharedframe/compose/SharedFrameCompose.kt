@@ -4,23 +4,24 @@ import androidx.activity.compose.BackHandler
 import androidx.compose.animation.core.Animatable
 import androidx.compose.animation.core.CubicBezierEasing
 import androidx.compose.animation.core.tween
-import androidx.compose.foundation.Canvas
-import androidx.compose.foundation.background
-import androidx.compose.foundation.gestures.detectDragGestures
+import androidx.compose.foundation.gestures.awaitEachGesture
+import androidx.compose.foundation.gestures.awaitFirstDown
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxScope
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.Stable
 import androidx.compose.runtime.getValue
-import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableStateMapOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
+import androidx.compose.runtime.snapshotFlow
+import androidx.compose.runtime.withFrameNanos
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.composed
+import androidx.compose.ui.draw.drawBehind
 import androidx.compose.ui.draw.drawWithContent
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Rect
@@ -28,32 +29,106 @@ import androidx.compose.ui.geometry.RoundRect
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.Path
 import androidx.compose.ui.graphics.TransformOrigin
-import androidx.compose.ui.graphics.drawscope.withTransform
+import androidx.compose.ui.graphics.drawscope.ContentDrawScope
 import androidx.compose.ui.graphics.drawscope.clipPath
+import androidx.compose.ui.graphics.drawscope.clipRect
+import androidx.compose.ui.graphics.drawscope.withTransform
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.graphics.painter.Painter
+import androidx.compose.ui.input.pointer.PointerId
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.input.pointer.util.VelocityTracker
 import androidx.compose.ui.layout.ContentScale
-import androidx.compose.ui.layout.boundsInRoot
+import androidx.compose.ui.layout.LayoutCoordinates
 import androidx.compose.ui.layout.onGloballyPositioned
-import androidx.compose.ui.layout.onSizeChanged
+import androidx.compose.ui.node.DrawModifierNode
+import androidx.compose.ui.node.GlobalPositionAwareModifierNode
+import androidx.compose.ui.node.ModifierNodeElement
+import androidx.compose.ui.platform.InspectorInfo
+import androidx.compose.ui.unit.Density
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import io.github.azizconi.sharedframe.core.Frame
 import io.github.azizconi.sharedframe.core.ImageTransform
 import io.github.azizconi.sharedframe.core.SharedFrameConfig
+import io.github.azizconi.sharedframe.core.SharedFrameGeometry
 import io.github.azizconi.sharedframe.core.SharedFrameMath
 import io.github.azizconi.sharedframe.core.SharedFramePhase
 import io.github.azizconi.sharedframe.core.SharedFrameStateMachine
 import io.github.azizconi.sharedframe.core.UniformTransform
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.flow.filterNotNull
+import kotlinx.coroutines.flow.first
+import kotlin.math.abs
+import kotlin.math.hypot
 
-internal data class ComposeSource(
+internal data class SourceRegistration(
+    val token: Long,
     val key: String,
     val painter: Painter,
-    val bounds: Frame,
-    val crop: Boolean,
-    val radiusPx: Float,
+    val contentScale: ContentScale,
+    val cornerRadius: Dp,
+    val coordinates: LayoutCoordinates,
+)
+
+internal data class DetailRegistration(
+    val token: Long,
+    val sessionId: Long,
+    val contentScale: ContentScale,
+    val coordinates: LayoutCoordinates,
+)
+
+internal data class TransitionSession(
+    val id: Long,
+    val key: String,
+    val painter: Painter,
+    val openingSource: SourceRegistration,
+)
+
+internal sealed interface Operation {
+    val id: Long
+    val sessionId: Long
+
+    data class Open(override val id: Long, override val sessionId: Long) : Operation
+    data class Close(
+        override val id: Long,
+        override val sessionId: Long,
+        val fromTransform: UniformTransform,
+    ) : Operation
+    data class CancelDrag(
+        override val id: Long,
+        override val sessionId: Long,
+        val fromTransform: UniformTransform,
+    ) : Operation
+}
+
+internal data class RenderState(
+    val prepared: Boolean = false,
+    val transform: UniformTransform = UniformTransform.Identity,
+    val mask: Frame? = null,
+    val image: ImageTransform? = null,
+    val radius: Float = 0f,
+    val scrimAlpha: Float = 0f,
+    val detailAlpha: Float = 1f,
+    val hiddenSourceToken: Long? = null,
+)
+
+private data class ControllerState(
+    val phase: SharedFramePhase = SharedFramePhase.Hidden,
+    val active: TransitionSession? = null,
+    val operation: Operation? = null,
+    val render: RenderState = RenderState(),
+    val frames: PreparedFrames? = null,
+)
+
+internal data class PreparedFrames(
+    val source: SourceRegistration,
+    val sourceFrame: Frame,
+    val parent: Frame,
+    val hero: Frame,
+    val geometry: SharedFrameGeometry,
+    val sourceImageScreen: ImageTransform,
+    val detailImageLocal: ImageTransform,
 )
 
 @Stable
@@ -61,90 +136,235 @@ class SharedFrameComposeController internal constructor(
     val config: SharedFrameConfig,
 ) {
     private val machine = SharedFrameStateMachine()
-    internal val sources = mutableStateMapOf<String, ComposeSource>()
-    internal var activeSource by mutableStateOf<ComposeSource?>(null)
-    var phase by mutableStateOf(SharedFramePhase.Hidden)
-        internal set
-    var activeKey by mutableStateOf<String?>(null)
-        internal set
-    internal var detailHeroFrame by mutableStateOf<Frame?>(null)
-    internal var hostFrame by mutableStateOf<Frame?>(null)
-    internal var renderTransform by mutableStateOf(UniformTransform.Identity)
-    internal var renderMask by mutableStateOf<Frame?>(null)
-    internal var renderImage by mutableStateOf<ImageTransform?>(null)
-    internal var renderRadius by mutableFloatStateOf(0f)
-    internal var scrimAlpha by mutableFloatStateOf(0f)
-    internal var detailAlpha by mutableFloatStateOf(1f)
-    internal var prepared by mutableStateOf(false)
-    internal var sourceHidden by mutableStateOf(false)
-    internal var dragX by mutableFloatStateOf(0f)
-    internal var dragY by mutableFloatStateOf(0f)
-    internal var closingStart by mutableStateOf<UniformTransform?>(null)
+    private val sources = mutableStateMapOf<String, SourceRegistration>()
+    private var nextToken = 0L
+    private var nextOperation = 0L
+
+    private var state by mutableStateOf(ControllerState())
+    private var hostCoordinates by mutableStateOf<LayoutCoordinates?>(null)
+    private var detailRegistration by mutableStateOf<DetailRegistration?>(null)
+
+    val phase: SharedFramePhase get() = state.phase
+    val activeKey: String? get() = state.active?.key
 
     fun open(key: String): Boolean {
-        val source = sources[key] ?: return false
+        val source = sources[key]?.takeIf { it.coordinates.isAttached } ?: return false
         if (!machine.beginOpen()) return false
-        activeKey = key
-        activeSource = source
-        phase = SharedFramePhase.Opening
-        prepared = false
-        sourceHidden = false
-        detailAlpha = 1f
-        closingStart = null
+        val sessionId = ++nextOperation
+        val active = TransitionSession(sessionId, key, source.painter, source)
+        state = ControllerState(
+            phase = SharedFramePhase.Opening,
+            active = active,
+            operation = Operation.Open(++nextOperation, sessionId),
+            render = RenderState(),
+        )
+        detailRegistration = null
         return true
     }
 
     fun close(): Boolean {
+        val active = state.active ?: return false
         if (!machine.beginClose()) return false
-        phase = SharedFramePhase.Closing
-        closingStart = UniformTransform.Identity
+        state = state.copy(
+            phase = SharedFramePhase.Closing,
+            operation = Operation.Close(++nextOperation, active.id, state.render.transform),
+        )
         return true
     }
 
     internal fun beginDrag(): Boolean {
         if (!machine.beginDrag()) return false
-        phase = SharedFramePhase.Dragging
-        dragX = 0f; dragY = 0f
+        state = state.copy(phase = SharedFramePhase.Dragging, operation = null)
         return true
     }
 
+    internal fun updateDrag(totalX: Float, totalY: Float) {
+        if (state.phase != SharedFramePhase.Dragging) return
+        val parent = currentHostFrame() ?: return
+        state = state.copy(
+            render = state.render.copy(
+                prepared = true,
+                transform = SharedFrameMath.dragTransform(totalX, totalY, parent.width, config.minimumDragScale),
+                mask = parent,
+                image = null,
+                radius = 0f,
+                scrimAlpha = config.scrimAlpha,
+                detailAlpha = 1f,
+            )
+        )
+    }
+
     internal fun cancelDrag() {
-        if (machine.cancelDrag()) phase = SharedFramePhase.CancellingDrag
+        val active = state.active ?: return
+        if (!machine.cancelDrag()) return
+        state = state.copy(
+            phase = SharedFramePhase.CancellingDrag,
+            operation = Operation.CancelDrag(++nextOperation, active.id, state.render.transform),
+        )
     }
 
     internal fun finishDrag() {
-        if (machine.beginClose()) {
-            closingStart = SharedFrameMath.dragTransform(dragX, dragY, hostFrame?.width ?: 1f, config.minimumDragScale)
-            phase = SharedFramePhase.Closing
-        }
+        val active = state.active ?: return
+        if (!machine.beginClose()) return
+        state = state.copy(
+            phase = SharedFramePhase.Closing,
+            operation = Operation.Close(++nextOperation, active.id, state.render.transform),
+        )
     }
 
-    internal fun finishOpen() { machine.finishOpen(); phase = SharedFramePhase.Idle }
-    internal fun finishCancel() { machine.finishCancel(); phase = SharedFramePhase.Idle }
-    internal fun finishClose() {
-        machine.finishClose()
-        phase = SharedFramePhase.Hidden
-        activeKey = null
-        activeSource = null
-        prepared = false
-        sourceHidden = false
-        closingStart = null
-        detailHeroFrame = null
-        detailAlpha = 1f
+    internal fun registerSource(registration: SourceRegistration) {
+        sources[registration.key] = registration
     }
 
-    internal fun abortOpen() {
+    internal fun unregisterSource(key: String, token: Long) {
+        if (sources[key]?.token == token) sources.remove(key)
+    }
+
+    internal fun registerDetail(registration: DetailRegistration) {
+        if (state.active?.id == registration.sessionId) detailRegistration = registration
+    }
+
+    internal fun unregisterDetail(token: Long) {
+        if (detailRegistration?.token == token) detailRegistration = null
+    }
+
+    internal fun registerHost(coordinates: LayoutCoordinates) {
+        hostCoordinates = coordinates
+    }
+
+    internal fun sourceIsHidden(token: Long): Boolean = state.render.hiddenSourceToken == token
+    internal fun renderState(): RenderState = state.render
+    internal fun preparedFrames(): PreparedFrames? = state.frames
+    internal fun activeSession(): TransitionSession? = state.active
+    internal fun operation(): Operation? = state.operation
+    internal fun newRegistrationToken(): Long = ++nextToken
+
+    internal fun transitionPainter(sessionId: Long): Pair<Painter, ImageTransform>? {
+        val active = state.active ?: return null
+        val image = state.render.image ?: return null
+        return if (active.id == sessionId) active.painter to image else null
+    }
+
+    internal suspend fun awaitReady(sessionId: Long): Pair<LayoutCoordinates, DetailRegistration> =
+        snapshotFlow {
+            val host = hostCoordinates
+            val detail = detailRegistration
+            if (host?.isAttached == true && detail?.coordinates?.isAttached == true && detail.sessionId == sessionId) {
+                host to detail
+            } else {
+                null
+            }
+        }.filterNotNull().first()
+
+    internal fun currentSource(key: String): SourceRegistration? =
+        sources[key]?.takeIf { it.coordinates.isAttached }
+
+    internal fun isCurrentOperation(id: Long): Boolean = state.operation?.id == id
+
+    internal fun installOpeningFrame(
+        operationId: Long,
+        prepared: PreparedFrames,
+        radius: Float,
+        image: ImageTransform,
+    ): Boolean {
+        if (!isCurrentOperation(operationId)) return false
+        state = state.copy(
+            render = RenderState(
+                prepared = true,
+                transform = prepared.geometry.collapsedTransform,
+                mask = prepared.geometry.collapsedMask,
+                image = image,
+                radius = radius,
+                scrimAlpha = 0f,
+                detailAlpha = 1f,
+                hiddenSourceToken = prepared.source.token,
+            ),
+            frames = prepared,
+        )
+        return true
+    }
+
+    internal fun updateAnimation(operationId: Long, render: RenderState): Boolean {
+        if (!isCurrentOperation(operationId)) return false
+        state = state.copy(render = render)
+        return true
+    }
+
+    internal fun finishOpen(operationId: Long, parent: Frame) {
+        if (!isCurrentOperation(operationId) || !machine.finishOpen()) return
+        state = state.copy(
+            phase = SharedFramePhase.Idle,
+            operation = null,
+            render = state.render.copy(
+                prepared = true,
+                transform = UniformTransform.Identity,
+                mask = parent,
+                image = null,
+                radius = 0f,
+                scrimAlpha = config.scrimAlpha,
+                detailAlpha = 1f,
+            ),
+        )
+    }
+
+    internal fun showExpandedImmediately(operationId: Long, parent: Frame?) {
+        if (!isCurrentOperation(operationId) || !machine.finishOpen()) return
+        val active = state.active ?: return forceHidden()
+        state = state.copy(
+            phase = SharedFramePhase.Idle,
+            operation = null,
+            render = RenderState(
+                prepared = true,
+                transform = UniformTransform.Identity,
+                mask = parent,
+                scrimAlpha = config.scrimAlpha,
+                detailAlpha = 1f,
+                hiddenSourceToken = active.openingSource.token,
+            ),
+            frames = null,
+        )
+    }
+
+    internal fun finishCancel(operationId: Long) {
+        if (!isCurrentOperation(operationId) || !machine.finishCancel()) return
+        state = state.copy(
+            phase = SharedFramePhase.Idle,
+            operation = null,
+            render = state.render.copy(
+                transform = UniformTransform.Identity,
+                image = null,
+                radius = 0f,
+                scrimAlpha = config.scrimAlpha,
+                detailAlpha = 1f,
+            ),
+        )
+    }
+
+    internal fun finishClose(operationId: Long) {
+        if (!isCurrentOperation(operationId) || !machine.finishClose()) return
+        state = ControllerState()
+        detailRegistration = null
+    }
+
+    internal fun forceHidden() {
         machine.forceHidden()
-        phase = SharedFramePhase.Hidden
-        activeKey = null
-        activeSource = null
-        prepared = false
-        sourceHidden = false
-        detailHeroFrame = null
+        state = ControllerState()
+        detailRegistration = null
     }
 
-    internal fun register(source: ComposeSource) { sources[source.key] = source }
-    internal fun unregister(key: String) { sources.remove(key) }
+    internal fun disposeHost() {
+        forceHidden()
+        hostCoordinates = null
+        detailRegistration = null
+        sources.clear()
+    }
+
+    private fun currentHostFrame(): Frame? {
+        val coordinates = hostCoordinates ?: return null
+        if (!coordinates.isAttached) return null
+        val size = coordinates.size
+        return Frame(0f, 0f, size.width.toFloat(), size.height.toFloat()).takeIf(Frame::isUsable)
+    }
 }
 
 @Composable
@@ -156,44 +376,22 @@ fun Modifier.sharedFrameSource(
     controller: SharedFrameComposeController,
     key: String,
     painter: Painter,
-    contentScale: ContentScale = ContentScale.Crop,
+    contentScale: ContentScale,
     cornerRadius: Dp = 0.dp,
-): Modifier = composed {
-    val density = androidx.compose.ui.platform.LocalDensity.current
-    val radiusPx = with(density) { cornerRadius.toPx() }
-    DisposableEffect(controller, key) { onDispose { controller.unregister(key) } }
-    onGloballyPositioned { coordinates ->
-        val rect = coordinates.boundsInRoot()
-        controller.register(
-            ComposeSource(
-                key,
-                painter,
-                rect.toCoreFrame(),
-                contentScale != ContentScale.Fit,
-                radiusPx,
-            )
-        )
-    }.graphicsLayer {
-        alpha = if (controller.activeKey == key && controller.sourceHidden) 0f else 1f
-    }
+): Modifier {
+    requireSupported(contentScale)
+    return this.then(SourceElement(controller, key, painter, contentScale, cornerRadius))
 }
 
 class SharedFrameDetailScope internal constructor(
-    internal val controller: SharedFrameComposeController,
+    private val controller: SharedFrameComposeController,
+    private val sessionId: Long,
     val key: String,
     val painter: Painter,
 ) {
-    fun Modifier.sharedFrameDetailHero(): Modifier = onGloballyPositioned { coordinates ->
-        // boundsInRoot includes ancestor graphics transforms. Freeze the identity-layout
-        // frame once opening is prepared; updating it during animation would restart the
-        // phase LaunchedEffect on every frame and pin the transition at fraction zero.
-        if (!controller.prepared || controller.phase == SharedFramePhase.Idle) {
-            controller.detailHeroFrame = coordinates.boundsInRoot().toCoreFrame()
-        }
-    }.graphicsLayer {
-        alpha = if (controller.phase == SharedFramePhase.Idle || controller.phase == SharedFramePhase.Dragging ||
-            controller.phase == SharedFramePhase.CancellingDrag
-        ) 1f else 0f
+    fun Modifier.sharedFrameDetailHero(contentScale: ContentScale): Modifier {
+        requireSupported(contentScale)
+        return this.then(DetailElement(controller, sessionId, contentScale))
     }
 }
 
@@ -204,220 +402,524 @@ fun SharedFrameHost(
     detailContent: @Composable SharedFrameDetailScope.() -> Unit,
     content: @Composable BoxScope.() -> Unit,
 ) {
-    val active = controller.activeSource
-    val closeTarget = controller.activeKey?.let(controller.sources::get)
-    val host = controller.hostFrame
-    val hero = controller.detailHeroFrame
+    val active = controller.activeSession()
+    val operation = controller.operation()
+    val density = androidx.compose.ui.platform.LocalDensity.current
+
+    DisposableEffect(controller) {
+        onDispose { controller.disposeHost() }
+    }
 
     BackHandler(enabled = controller.phase != SharedFramePhase.Hidden) {
         if (controller.phase == SharedFramePhase.Idle) controller.close()
     }
 
-    androidx.compose.runtime.LaunchedEffect(controller.phase, active, closeTarget, host, hero) {
-        when (controller.phase) {
-            SharedFramePhase.Opening -> if (active != null && host != null && hero != null) {
-                runOpening(controller, active, host, hero)
+    LaunchedEffect(operation?.id) {
+        val current = operation ?: return@LaunchedEffect
+        try {
+            when (current) {
+                is Operation.Open -> runOpening(controller, current, density)
+                is Operation.Close -> runClosing(controller, current, density)
+                is Operation.CancelDrag -> runCancel(controller, current)
             }
-            SharedFramePhase.Closing -> if (host != null && hero != null) {
-                runClosing(controller, closeTarget, host, hero)
-            }
-            SharedFramePhase.CancellingDrag -> runCancel(controller)
-            else -> Unit
+        } catch (cancelled: CancellationException) {
+            if (controller.isCurrentOperation(current.id)) controller.forceHidden()
+            throw cancelled
         }
     }
 
-    Box(
-        modifier.onSizeChanged { controller.hostFrame = Frame(0f, 0f, it.width.toFloat(), it.height.toFloat()) }
-    ) {
+    Box(modifier.onGloballyPositioned(controller::registerHost)) {
         content()
         if (active != null && controller.phase != SharedFramePhase.Hidden) {
-            Box(Modifier.fillMaxSize().background(Color.Black.copy(alpha = controller.scrimAlpha)))
-            run {
-                val transform = controller.renderTransform
-                val mask = controller.renderMask
-                val detailModifier = Modifier
-                    .fillMaxSize()
-                    .graphicsLayer {
-                        scaleX = transform.scale
-                        scaleY = transform.scale
-                        translationX = transform.translationX
-                        translationY = transform.translationY
-                        transformOrigin = TransformOrigin.Center
-                        alpha = if (controller.prepared) controller.detailAlpha else 0f
-                    }
-                    .drawWithContent {
-                        if (mask == null) drawContent() else {
-                            val path = Path().apply {
-                                addRoundRect(
-                                    RoundRect(
-                                        Rect(mask.left, mask.top, mask.right, mask.bottom),
-                                        controller.renderRadius,
-                                        controller.renderRadius,
-                                    )
-                                )
-                            }
-                            clipPath(path) { this@drawWithContent.drawContent() }
-                        }
-                    }
-                    .then(if (controller.prepared) Modifier.sharedFrameDrag(controller) else Modifier)
-                Box(detailModifier) {
-                    val scope = SharedFrameDetailScope(controller, active.key, active.painter)
-                    scope.detailContent()
-                    val image = controller.renderImage
-                    if (image != null && controller.phase != SharedFramePhase.Idle &&
-                        controller.phase != SharedFramePhase.Dragging && controller.phase != SharedFramePhase.CancellingDrag
-                    ) {
-                        Canvas(Modifier.fillMaxSize()) {
-                            withTransform({
-                                translate(image.translationX, image.translationY)
-                                scale(image.scale, image.scale, Offset.Zero)
-                            }) {
-                                with(active.painter) { draw(intrinsicSize) }
-                            }
-                        }
-                    }
+            Box(
+                Modifier.fillMaxSize().drawBehind {
+                    drawRect(Color.Black.copy(alpha = controller.renderState().scrimAlpha))
                 }
+            )
+            val detailModifier = Modifier
+                .fillMaxSize()
+                .graphicsLayer {
+                    val render = controller.renderState()
+                    val transform = render.transform
+                    scaleX = transform.scale
+                    scaleY = transform.scale
+                    translationX = transform.translationX
+                    translationY = transform.translationY
+                    transformOrigin = TransformOrigin.Center
+                    alpha = if (render.prepared) render.detailAlpha else 0f
+                }
+                .drawWithSharedFrameMask(controller)
+                .sharedFrameDrag(controller, active.id)
+
+            Box(detailModifier) {
+                SharedFrameDetailScope(controller, active.id, active.key, active.painter).detailContent()
             }
         }
     }
 }
 
-private fun Modifier.sharedFrameDrag(controller: SharedFrameComposeController): Modifier = pointerInput(controller.phase) {
-    if (controller.phase != SharedFramePhase.Idle) return@pointerInput
-    val tracker = VelocityTracker()
-    detectDragGestures(
-        onDragStart = { controller.beginDrag() },
-        onDragCancel = { controller.cancelDrag() },
-        onDragEnd = {
-            val velocity = tracker.calculateVelocity().x
-            val width = controller.hostFrame?.width ?: 1f
-            val finish = SharedFrameMath.shouldFinishDismiss(
-                controller.dragX,
-                velocity,
-                width,
-                controller.config.minimumFlingVelocityDp * density,
-                controller.config.dismissDistanceFraction,
-            )
-            if (finish) controller.finishDrag() else controller.cancelDrag()
-        },
-    ) { change, amount ->
-        change.consume()
-        tracker.addPosition(change.uptimeMillis, change.position)
-        controller.dragX += amount.x
-        controller.dragY += amount.y
-        controller.renderTransform = SharedFrameMath.dragTransform(
-            controller.dragX,
-            controller.dragY,
-            controller.hostFrame?.width ?: 1f,
-            controller.config.minimumDragScale,
-        )
-        controller.renderMask = controller.hostFrame
-        controller.renderRadius = 0f
-        controller.scrimAlpha = controller.config.scrimAlpha
+private fun Modifier.drawWithSharedFrameMask(controller: SharedFrameComposeController): Modifier =
+    drawWithContent {
+        val render = controller.renderState()
+        val mask = render.mask
+        if (mask == null) {
+            drawContent()
+        } else {
+            val path = Path().apply {
+                addRoundRect(RoundRect(Rect(mask.left, mask.top, mask.right, mask.bottom), render.radius, render.radius))
+            }
+            clipPath(path) { this@drawWithContent.drawContent() }
+        }
+    }
+
+private fun Modifier.sharedFrameDrag(
+    controller: SharedFrameComposeController,
+    sessionId: Long,
+): Modifier = pointerInput(controller, sessionId) {
+    awaitEachGesture {
+        val down = awaitFirstDown(requireUnconsumed = false)
+        if (controller.phase != SharedFramePhase.Idle) return@awaitEachGesture
+
+        val pointerId: PointerId = down.id
+        val start = down.position
+        val tracker = VelocityTracker().also { it.addPosition(down.uptimeMillis, down.position) }
+        var horizontalLocked = false
+        var rejected = false
+        var dragging = false
+
+        while (true) {
+            val event = awaitPointerEvent()
+            val change = event.changes.firstOrNull { it.id == pointerId } ?: break
+            tracker.addPosition(change.uptimeMillis, change.position)
+            val total = change.position - start
+
+            if (!horizontalLocked && !rejected && hypot(total.x.toDouble(), total.y.toDouble()) > viewConfiguration.touchSlop) {
+                horizontalLocked = abs(total.x) > abs(total.y) * 1.15f
+                rejected = !horizontalLocked
+                if (horizontalLocked) dragging = controller.beginDrag()
+            }
+
+            if (horizontalLocked && dragging) {
+                change.consume()
+                controller.updateDrag(total.x, total.y)
+            }
+
+            if (!change.pressed) {
+                if (dragging && controller.phase == SharedFramePhase.Dragging) {
+                    val velocity = tracker.calculateVelocity().x
+                    val width = size.width.toFloat().coerceAtLeast(1f)
+                    val finish = SharedFrameMath.shouldFinishDismiss(
+                        total.x,
+                        velocity,
+                        width,
+                        controller.config.minimumFlingVelocityDp * density,
+                        controller.config.dismissDistanceFraction,
+                    )
+                    if (finish) controller.finishDrag() else controller.cancelDrag()
+                }
+                break
+            }
+        }
     }
 }
 
 private suspend fun runOpening(
     controller: SharedFrameComposeController,
-    source: ComposeSource,
-    parent: Frame,
-    hero: Frame,
+    operation: Operation.Open,
+    density: Density,
 ) {
-    val geometry = SharedFrameMath.buildGeometry(source.bounds, parent, hero) ?: return controller.abortOpen()
-    val transforms = imageTransforms(source, parent, hero, UniformTransform.Identity) ?: return controller.abortOpen()
-    controller.renderTransform = geometry.collapsedTransform
-    controller.renderMask = geometry.collapsedMask
-    controller.renderRadius = source.radiusPx / geometry.collapsedTransform.scale
-    controller.scrimAlpha = 0f
-    controller.renderImage = localImage(transforms.first, parent, hero, geometry.collapsedTransform)
-    controller.prepared = true
-    controller.sourceHidden = true
-    val animation = Animatable(0f)
-    val easing = controller.config.easing
-    animation.animateTo(1f, tween(controller.config.durationMillis.toInt(), easing = CubicBezierEasing(easing.x1, easing.y1, easing.x2, easing.y2))) {
-        val transform = SharedFrameMath.lerp(geometry.collapsedTransform, UniformTransform.Identity, value)
-        controller.renderTransform = transform
-        controller.renderMask = SharedFrameMath.lerp(geometry.collapsedMask, geometry.expandedMask, value)
-        controller.renderRadius = lerp(source.radiusPx / geometry.collapsedTransform.scale, 0f, value)
-        controller.scrimAlpha = lerp(0f, controller.config.scrimAlpha, value)
-        controller.renderImage = localImage(SharedFrameMath.lerp(transforms.first, transforms.second, value), parent, hero, transform)
+    val active = controller.activeSession()?.takeIf { it.id == operation.sessionId }
+        ?: return controller.forceHidden()
+    val (hostCoordinates, detail) = controller.awaitReady(operation.sessionId)
+    if (!controller.isCurrentOperation(operation.id)) return
+
+    val prepared = prepareFrames(hostCoordinates, detail, active.openingSource)
+    if (prepared == null) {
+        controller.showExpandedImmediately(operation.id, hostCoordinates.hostFrame())
+        return
     }
-    controller.renderImage = null
-    controller.finishOpen()
+
+    val collapsed = prepared.geometry.collapsedTransform
+    val collapsedRadius = prepared.source.cornerRadius.toPx(density) / collapsed.scale
+    val openingImage = SharedFrameMath.localImageTransformForScreen(
+        prepared.sourceImageScreen,
+        prepared.parent,
+        prepared.hero,
+        collapsed,
+    ) ?: return controller.showExpandedImmediately(operation.id, prepared.parent)
+
+    if (!controller.installOpeningFrame(operation.id, prepared, collapsedRadius, openingImage)) return
+    withFrameNanos { }
+    withFrameNanos { }
+    if (!controller.isCurrentOperation(operation.id)) return
+
+    val detailImageScreen = SharedFrameMath.imageTransformInScreen(
+        prepared.detailImageLocal,
+        prepared.parent,
+        prepared.hero,
+        UniformTransform.Identity,
+    ) ?: return controller.showExpandedImmediately(operation.id, prepared.parent)
+    val easing = controller.config.easing
+    Animatable(0f).animateTo(
+        1f,
+        tween(
+            durationMillis = controller.config.durationMillis.toInt(),
+            easing = CubicBezierEasing(easing.x1, easing.y1, easing.x2, easing.y2),
+        ),
+    ) {
+        val transform = SharedFrameMath.lerp(collapsed, UniformTransform.Identity, value)
+        val desiredImage = SharedFrameMath.lerp(prepared.sourceImageScreen, detailImageScreen, value)
+        val localImage = SharedFrameMath.localImageTransformForScreen(
+            desiredImage,
+            prepared.parent,
+            prepared.hero,
+            transform,
+        ) ?: return@animateTo
+
+        controller.updateAnimation(
+            operation.id,
+            RenderState(
+                prepared = true,
+                transform = transform,
+                mask = SharedFrameMath.lerp(prepared.geometry.collapsedMask, prepared.geometry.expandedMask, value),
+                image = localImage,
+                radius = lerp(collapsedRadius, 0f, value),
+                scrimAlpha = lerp(0f, controller.config.scrimAlpha, value),
+                detailAlpha = 1f,
+                hiddenSourceToken = prepared.source.token,
+            ),
+        )
+    }
+    controller.finishOpen(operation.id, prepared.parent)
 }
 
 private suspend fun runClosing(
     controller: SharedFrameComposeController,
-    source: ComposeSource?,
-    parent: Frame,
-    hero: Frame,
+    operation: Operation.Close,
+    density: Density,
 ) {
-    if (source == null || !source.bounds.intersects(parent)) {
-        val animation = Animatable(0f)
-        animation.animateTo(1f, tween(controller.config.durationMillis.toInt())) {
-            controller.detailAlpha = 1f - value
-            controller.scrimAlpha = controller.config.scrimAlpha * (1f - value)
-        }
-        controller.finishClose()
+    val active = controller.activeSession()?.takeIf { it.id == operation.sessionId }
+        ?: return controller.forceHidden()
+    val (hostCoordinates, detail) = controller.awaitReady(operation.sessionId)
+    if (!controller.isCurrentOperation(operation.id)) return
+
+    val source = controller.currentSource(active.key)
+    val prepared = source?.let { prepareFrames(hostCoordinates, detail, it) }
+    if (prepared == null || !prepared.sourceFrame.intersects(prepared.parent)) {
+        runFadeClose(controller, operation)
         return
     }
-    val geometry = SharedFrameMath.buildGeometry(source.bounds, parent, hero) ?: return controller.finishClose()
-    val from = controller.closingStart ?: UniformTransform.Identity
-    val detailLocal = imageLocal(source, hero) ?: return controller.finishClose()
-    val detailScreen = SharedFrameMath.imageTransformInScreen(detailLocal, parent, hero, from) ?: return controller.finishClose()
-    val sourceScreen = sourceScreenTransform(source) ?: return controller.finishClose()
-    controller.prepared = true
-    controller.sourceHidden = true
-    controller.renderTransform = from
-    controller.renderMask = parent
-    controller.renderImage = localImage(detailScreen, parent, hero, from)
-    val animation = Animatable(0f)
+
+    val fromTransform = operation.fromTransform
+    val startImageScreen = SharedFrameMath.imageTransformInScreen(
+        prepared.detailImageLocal,
+        prepared.parent,
+        prepared.hero,
+        fromTransform,
+    ) ?: return runFadeClose(controller, operation)
+    val startImageLocal = SharedFrameMath.localImageTransformForScreen(
+        startImageScreen,
+        prepared.parent,
+        prepared.hero,
+        fromTransform,
+    ) ?: return runFadeClose(controller, operation)
+    val collapsedRadius = prepared.source.cornerRadius.toPx(density) / prepared.geometry.collapsedTransform.scale
+    val startMask = prepared.parent
+
+    if (!controller.updateAnimation(
+            operation.id,
+            RenderState(
+                prepared = true,
+                transform = fromTransform,
+                mask = startMask,
+                image = startImageLocal,
+                radius = 0f,
+                scrimAlpha = controller.config.scrimAlpha,
+                detailAlpha = 1f,
+                hiddenSourceToken = prepared.source.token,
+            ),
+        )
+    ) return
+
+    withFrameNanos { }
+    withFrameNanos { }
     val easing = controller.config.easing
-    animation.animateTo(1f, tween(controller.config.durationMillis.toInt(), easing = CubicBezierEasing(easing.x1, easing.y1, easing.x2, easing.y2))) {
-        val transform = SharedFrameMath.lerp(from, geometry.collapsedTransform, value)
-        controller.renderTransform = transform
-        controller.renderMask = SharedFrameMath.lerp(parent, geometry.collapsedMask, value)
-        controller.renderRadius = lerp(0f, source.radiusPx / geometry.collapsedTransform.scale, value)
-        controller.scrimAlpha = controller.config.scrimAlpha * (1f - value)
-        controller.renderImage = localImage(SharedFrameMath.lerp(detailScreen, sourceScreen, value), parent, hero, transform)
+    Animatable(0f).animateTo(
+        1f,
+        tween(
+            durationMillis = controller.config.durationMillis.toInt(),
+            easing = CubicBezierEasing(easing.x1, easing.y1, easing.x2, easing.y2),
+        ),
+    ) {
+        val transform = SharedFrameMath.lerp(fromTransform, prepared.geometry.collapsedTransform, value)
+        val desiredImage = SharedFrameMath.lerp(startImageScreen, prepared.sourceImageScreen, value)
+        val localImage = SharedFrameMath.localImageTransformForScreen(
+            desiredImage,
+            prepared.parent,
+            prepared.hero,
+            transform,
+        ) ?: return@animateTo
+        controller.updateAnimation(
+            operation.id,
+            RenderState(
+                prepared = true,
+                transform = transform,
+                mask = SharedFrameMath.lerp(startMask, prepared.geometry.collapsedMask, value),
+                image = localImage,
+                radius = lerp(0f, collapsedRadius, value),
+                scrimAlpha = lerp(controller.config.scrimAlpha, 0f, value),
+                detailAlpha = 1f,
+                hiddenSourceToken = prepared.source.token,
+            ),
+        )
     }
-    controller.finishClose()
+    controller.finishClose(operation.id)
 }
 
-private suspend fun runCancel(controller: SharedFrameComposeController) {
-    val from = controller.renderTransform
-    val animation = Animatable(0f)
-    animation.animateTo(1f, tween(controller.config.durationMillis.toInt())) {
-        controller.renderTransform = SharedFrameMath.lerp(from, UniformTransform.Identity, value)
+private suspend fun runFadeClose(
+    controller: SharedFrameComposeController,
+    operation: Operation.Close,
+) {
+    val start = controller.renderState()
+    controller.updateAnimation(operation.id, start.copy(prepared = true, image = null, hiddenSourceToken = null))
+    val easing = controller.config.easing
+    Animatable(0f).animateTo(
+        1f,
+        tween(
+            durationMillis = controller.config.durationMillis.toInt(),
+            easing = CubicBezierEasing(easing.x1, easing.y1, easing.x2, easing.y2),
+        ),
+    ) {
+        controller.updateAnimation(
+            operation.id,
+            start.copy(
+                prepared = true,
+                image = null,
+                detailAlpha = 1f - value,
+                scrimAlpha = start.scrimAlpha * (1f - value),
+                hiddenSourceToken = null,
+            ),
+        )
     }
-    controller.finishCancel()
+    controller.finishClose(operation.id)
 }
 
-private fun imageTransforms(source: ComposeSource, parent: Frame, hero: Frame, parentTransform: UniformTransform): Pair<ImageTransform, ImageTransform>? {
-    val sourceScreen = sourceScreenTransform(source) ?: return null
-    val detailLocal = imageLocal(source, hero) ?: return null
-    val detailScreen = SharedFrameMath.imageTransformInScreen(detailLocal, parent, hero, parentTransform) ?: return null
-    return sourceScreen to detailScreen
+private suspend fun runCancel(
+    controller: SharedFrameComposeController,
+    operation: Operation.CancelDrag,
+) {
+    val start = controller.renderState()
+    val easing = controller.config.easing
+    Animatable(0f).animateTo(
+        1f,
+        tween(
+            durationMillis = controller.config.durationMillis.toInt(),
+            easing = CubicBezierEasing(easing.x1, easing.y1, easing.x2, easing.y2),
+        ),
+    ) {
+        controller.updateAnimation(
+            operation.id,
+            start.copy(
+                transform = SharedFrameMath.lerp(operation.fromTransform, UniformTransform.Identity, value),
+                image = null,
+                radius = 0f,
+                scrimAlpha = controller.config.scrimAlpha,
+                detailAlpha = 1f,
+            ),
+        )
+    }
+    controller.finishCancel(operation.id)
 }
 
-private fun sourceScreenTransform(source: ComposeSource): ImageTransform? {
-    val size = source.painter.intrinsicSize
-    if (!size.width.isFinite() || !size.height.isFinite()) return null
-    val local = if (source.crop) SharedFrameMath.centerCropTransform(size.width, size.height, source.bounds.width, source.bounds.height)
-    else SharedFrameMath.centerFitTransform(size.width, size.height, source.bounds.width, source.bounds.height)
-    return local?.let { ImageTransform(it.scale, source.bounds.left + it.translationX, source.bounds.top + it.translationY) }
+private fun prepareFrames(
+    hostCoordinates: LayoutCoordinates,
+    detail: DetailRegistration,
+    source: SourceRegistration,
+): PreparedFrames? {
+    if (!hostCoordinates.isAttached || !detail.coordinates.isAttached || !source.coordinates.isAttached) return null
+    val parent = hostCoordinates.hostFrame() ?: return null
+    val sourceFrame = hostCoordinates.localBoundingBoxOf(source.coordinates, clipBounds = false).toCoreFrame()
+    val heroFrame = hostCoordinates.localBoundingBoxOf(detail.coordinates, clipBounds = false).toCoreFrame()
+    val geometry = SharedFrameMath.buildGeometry(sourceFrame, parent, heroFrame) ?: return null
+    val intrinsic = source.painter.intrinsicSize
+    if (!intrinsic.width.isFinite() || !intrinsic.height.isFinite() || intrinsic.width <= 0f || intrinsic.height <= 0f) return null
+
+    val sourceLocal = imageTransform(source.contentScale, intrinsic.width, intrinsic.height, sourceFrame.width, sourceFrame.height)
+        ?: return null
+    val detailLocal = imageTransform(detail.contentScale, intrinsic.width, intrinsic.height, heroFrame.width, heroFrame.height)
+        ?: return null
+    val sourceScreen = ImageTransform(
+        sourceLocal.scale,
+        sourceFrame.left + sourceLocal.translationX,
+        sourceFrame.top + sourceLocal.translationY,
+    )
+    return PreparedFrames(source, sourceFrame, parent, heroFrame, geometry, sourceScreen, detailLocal)
 }
 
-private fun imageLocal(source: ComposeSource, hero: Frame): ImageTransform? {
-    val size = source.painter.intrinsicSize
-    if (!size.width.isFinite() || !size.height.isFinite()) return null
-    return if (source.crop) SharedFrameMath.centerCropTransform(size.width, size.height, hero.width, hero.height)
-    else SharedFrameMath.centerFitTransform(size.width, size.height, hero.width, hero.height)
+private fun imageTransform(
+    contentScale: ContentScale,
+    contentWidth: Float,
+    contentHeight: Float,
+    containerWidth: Float,
+    containerHeight: Float,
+): ImageTransform? = when (contentScale) {
+    ContentScale.Crop -> SharedFrameMath.centerCropTransform(contentWidth, contentHeight, containerWidth, containerHeight)
+    ContentScale.Fit -> SharedFrameMath.centerFitTransform(contentWidth, contentHeight, containerWidth, containerHeight)
+    else -> null
 }
 
-private fun localImage(screen: ImageTransform, parent: Frame, hero: Frame, transform: UniformTransform) =
-    SharedFrameMath.localImageTransformForScreen(screen, parent, hero, transform)
+private data class SourceElement(
+    val controller: SharedFrameComposeController,
+    val key: String,
+    val painter: Painter,
+    val contentScale: ContentScale,
+    val cornerRadius: Dp,
+) : ModifierNodeElement<SourceNode>() {
+    override fun create() = SourceNode(controller, key, painter, contentScale, cornerRadius)
+    override fun update(node: SourceNode) = node.update(controller, key, painter, contentScale, cornerRadius)
+    override fun InspectorInfo.inspectableProperties() {
+        name = "sharedFrameSource"
+        properties["key"] = key
+        properties["contentScale"] = contentScale
+        properties["cornerRadius"] = cornerRadius
+    }
+}
 
-private fun Frame.intersects(other: Frame) = right > other.left && left < other.right && bottom > other.top && top < other.bottom
+private class SourceNode(
+    private var controller: SharedFrameComposeController,
+    private var key: String,
+    private var painter: Painter,
+    private var contentScale: ContentScale,
+    private var cornerRadius: Dp,
+) : Modifier.Node(), GlobalPositionAwareModifierNode, DrawModifierNode {
+    private var coordinates: LayoutCoordinates? = null
+    private var token: Long = controller.newRegistrationToken()
+
+    override fun onGloballyPositioned(coordinates: LayoutCoordinates) {
+        this.coordinates = coordinates
+        register()
+    }
+
+    override fun ContentDrawScope.draw() {
+        if (!controller.sourceIsHidden(token)) drawContent()
+    }
+
+    override fun onDetach() {
+        controller.unregisterSource(key, token)
+        coordinates = null
+    }
+
+    fun update(
+        controller: SharedFrameComposeController,
+        key: String,
+        painter: Painter,
+        contentScale: ContentScale,
+        cornerRadius: Dp,
+    ) {
+        val identityChanged = this.controller !== controller || this.key != key
+        if (identityChanged) {
+            this.controller.unregisterSource(this.key, token)
+            token = controller.newRegistrationToken()
+        }
+        this.controller = controller
+        this.key = key
+        this.painter = painter
+        this.contentScale = contentScale
+        this.cornerRadius = cornerRadius
+        register()
+    }
+
+    private fun register() {
+        val coordinates = coordinates ?: return
+        if (!coordinates.isAttached) return
+        controller.registerSource(SourceRegistration(token, key, painter, contentScale, cornerRadius, coordinates))
+    }
+}
+
+private data class DetailElement(
+    val controller: SharedFrameComposeController,
+    val sessionId: Long,
+    val contentScale: ContentScale,
+) : ModifierNodeElement<DetailNode>() {
+    override fun create() = DetailNode(controller, sessionId, contentScale)
+    override fun update(node: DetailNode) = node.update(controller, sessionId, contentScale)
+    override fun InspectorInfo.inspectableProperties() {
+        name = "sharedFrameDetailHero"
+        properties["contentScale"] = contentScale
+    }
+}
+
+private class DetailNode(
+    private var controller: SharedFrameComposeController,
+    private var sessionId: Long,
+    private var contentScale: ContentScale,
+) : Modifier.Node(), GlobalPositionAwareModifierNode, DrawModifierNode {
+    private var coordinates: LayoutCoordinates? = null
+    private var token: Long = controller.newRegistrationToken()
+
+    override fun onGloballyPositioned(coordinates: LayoutCoordinates) {
+        this.coordinates = coordinates
+        register()
+    }
+
+    override fun ContentDrawScope.draw() {
+        val transition = controller.transitionPainter(sessionId)
+        if (transition == null) {
+            drawContent()
+            return
+        }
+        val (painter, image) = transition
+        val intrinsic = painter.intrinsicSize
+        if (!intrinsic.width.isFinite() || !intrinsic.height.isFinite() || intrinsic.width <= 0f || intrinsic.height <= 0f) {
+            drawContent()
+            return
+        }
+        clipRect(0f, 0f, size.width, size.height) {
+            withTransform({
+                translate(image.translationX, image.translationY)
+                scale(image.scale, image.scale, Offset.Zero)
+            }) {
+                with(painter) { draw(intrinsic) }
+            }
+        }
+    }
+
+    override fun onDetach() {
+        controller.unregisterDetail(token)
+        coordinates = null
+    }
+
+    fun update(controller: SharedFrameComposeController, sessionId: Long, contentScale: ContentScale) {
+        val identityChanged = this.controller !== controller || this.sessionId != sessionId
+        if (identityChanged) {
+            this.controller.unregisterDetail(token)
+            token = controller.newRegistrationToken()
+        }
+        this.controller = controller
+        this.sessionId = sessionId
+        this.contentScale = contentScale
+        register()
+    }
+
+    private fun register() {
+        val coordinates = coordinates ?: return
+        if (!coordinates.isAttached) return
+        controller.registerDetail(DetailRegistration(token, sessionId, contentScale, coordinates))
+    }
+}
+
+private fun requireSupported(contentScale: ContentScale) {
+    require(contentScale == ContentScale.Crop || contentScale == ContentScale.Fit) {
+        "Shared Frame supports only ContentScale.Crop and ContentScale.Fit"
+    }
+}
+
+private fun LayoutCoordinates.hostFrame(): Frame? {
+    if (!isAttached) return null
+    return Frame(0f, 0f, size.width.toFloat(), size.height.toFloat()).takeIf(Frame::isUsable)
+}
+
+private fun Dp.toPx(density: Density): Float = with(density) { toPx() }
 private fun Rect.toCoreFrame() = Frame(left, top, right, bottom)
-private fun lerp(a: Float, b: Float, t: Float) = a + (b - a) * t
+private fun Frame.intersects(other: Frame) = right > other.left && left < other.right && bottom > other.top && top < other.bottom
+private fun lerp(start: Float, end: Float, fraction: Float) = start + (end - start) * fraction
