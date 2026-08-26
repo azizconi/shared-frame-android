@@ -39,6 +39,7 @@ import androidx.compose.ui.test.swipe
 import androidx.compose.ui.unit.dp
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import io.github.azizconi.sharedframe.core.SharedFrameConfig
+import io.github.azizconi.sharedframe.core.SharedFrameDismissDirection
 import io.github.azizconi.sharedframe.core.SharedFrameMath
 import io.github.azizconi.sharedframe.core.SharedFramePhase
 import kotlin.math.abs
@@ -108,7 +109,7 @@ class SharedFrameComposeTest {
     }
 
     @Test
-    fun gesturesRejectVerticalCancelLeftAndFinishRight() {
+    fun gesturesCancelShortDragRejectUpAndFinishLeftRightAndDown() {
         lateinit var controller: SharedFrameComposeController
         val painter = PatternPainter()
         compose.setContent {
@@ -119,28 +120,54 @@ class SharedFrameComposeTest {
         compose.onNodeWithTag(SOURCE).performClick()
         compose.waitUntil(3_000) { controller.phase == SharedFramePhase.Idle }
 
-        compose.onNodeWithTag(HOST).performTouchInput {
-            swipe(center, center + Offset(10f, 260f), 400)
-        }
+        compose.onNodeWithTag(HOST).performTouchInput { swipe(center, center + Offset(10f, -260f), 400) }
         compose.waitForIdle()
         assertEquals(SharedFramePhase.Idle, controller.phase)
 
-        compose.runOnUiThread { compose.activity.onBackPressedDispatcher.onBackPressed() }
-        compose.waitUntil(3_000) { controller.phase == SharedFramePhase.Hidden }
-        compose.onNodeWithTag(SOURCE).performClick()
-        compose.waitUntil(3_000) { controller.phase == SharedFramePhase.Idle }
-
-        compose.onNodeWithTag(HOST).performTouchInput {
-            swipe(center, center + Offset(-180f, 30f), 600)
-        }
+        compose.onNodeWithTag(HOST).performTouchInput { swipe(center, center + Offset(30f, 3f), 700) }
         compose.waitUntil(3_000) { controller.phase == SharedFramePhase.Idle }
         assertEquals(1f, controller.renderState().transform.scale, .001f)
 
-        compose.onNodeWithTag(HOST).performTouchInput {
-            swipe(center, Offset(right - 20f, center.y + 30f), 650)
-        }
+        compose.onNodeWithTag(HOST).performTouchInput { swipe(center, center + Offset(-180f, 25f), 600) }
+        compose.waitUntil(3_000) { controller.phase == SharedFramePhase.Hidden }
+
+        compose.onNodeWithTag(SOURCE).performClick()
+        compose.waitUntil(3_000) { controller.phase == SharedFramePhase.Idle }
+        compose.onNodeWithTag(HOST).performTouchInput { swipe(center, center + Offset(180f, 25f), 600) }
+        compose.waitUntil(3_000) { controller.phase == SharedFramePhase.Hidden }
+
+        compose.onNodeWithTag(SOURCE).performClick()
+        compose.waitUntil(3_000) { controller.phase == SharedFramePhase.Idle }
+        compose.onNodeWithTag(HOST).performTouchInput { swipe(center, center + Offset(25f, 180f), 600) }
         compose.waitUntil(3_000) { controller.phase == SharedFramePhase.Hidden }
         assertEquals(SharedFramePhase.Hidden, controller.phase)
+    }
+
+    @Test
+    fun downDismissWaitsUntilCallerReportsTopBoundary() {
+        lateinit var controller: SharedFrameComposeController
+        val canDragDown = mutableStateOf(false)
+        val painter = PatternPainter()
+        compose.setContent {
+            controller = rememberSharedFrameController(SharedFrameConfig(durationMillis = 80))
+            TestHost(
+                controller,
+                painter,
+                remember { mutableStateOf(true) },
+                canStartDismiss = { it != SharedFrameDismissDirection.Down || canDragDown.value },
+            )
+        }
+        compose.waitForIdle()
+        compose.onNodeWithTag(SOURCE).performClick()
+        compose.waitUntil(3_000) { controller.phase == SharedFramePhase.Idle }
+
+        compose.onNodeWithTag(HOST).performTouchInput { swipe(center, center + Offset(5f, 220f), 600) }
+        compose.waitForIdle()
+        assertEquals(SharedFramePhase.Idle, controller.phase)
+
+        compose.runOnIdle { canDragDown.value = true }
+        compose.onNodeWithTag(HOST).performTouchInput { swipe(center, center + Offset(5f, 220f), 600) }
+        compose.waitUntil(3_000) { controller.phase == SharedFramePhase.Hidden }
     }
 
     @Test
@@ -250,11 +277,13 @@ private fun TestHost(
     controller: SharedFrameComposeController,
     painter: Painter,
     sourceVisible: MutableState<Boolean>,
+    canStartDismiss: (SharedFrameDismissDirection) -> Boolean = { true },
 ) {
     Box(Modifier.fillMaxSize().background(Color(0xFF303030)).padding(24.dp)) {
         SharedFrameHost(
             controller = controller,
             modifier = Modifier.size(320.dp, 640.dp).background(Color.White).testTag("host"),
+            canStartDismiss = canStartDismiss,
             detailContent = {
                 Column(Modifier.fillMaxSize().background(Color.White).testTag("detail")) {
                     Box(Modifier.fillMaxWidth().height(64.dp).background(Color(0xFF00BCD4)).testTag("header"))

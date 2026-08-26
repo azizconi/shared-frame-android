@@ -12,5 +12,5 @@
     <string name="photo_number">Photo %1$d</string>
     <string name="photo_title">Moment #%1$d</string>
     <string name="detail_description">A gesture-driven shared frame transition. The complete detail screen grows from the selected tile and returns to exactly the same place.</string>
-    <string name="drag_hint">Drag horizontally to dismiss</string>
+    <string name="drag_hint">Swipe left, right, or down to dismiss</string>
 </resources>

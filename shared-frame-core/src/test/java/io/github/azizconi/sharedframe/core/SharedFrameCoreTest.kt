@@ -37,10 +37,53 @@ class SharedFrameCoreTest {
     }
 
     @Test fun dragAndDismissUseConfiguredDirection() {
+        // Compatibility overloads retain their original right-only behavior.
         assertEquals(1f, SharedFrameMath.dragTransform(-300f, 20f, 1000f).scale, .001f)
         assertEquals(.6f, SharedFrameMath.dragTransform(1200f, 20f, 1000f).scale, .001f)
         assertFalse(SharedFrameMath.shouldFinishDismiss(100f, 200f, 1000f, 1100f))
         assertTrue(SharedFrameMath.shouldFinishDismiss(260f, 200f, 1000f, 1100f))
+    }
+
+    @Test fun directionAwareDragSupportsLeftRightAndDown() {
+        val allowed = setOf(
+            SharedFrameDismissDirection.Left,
+            SharedFrameDismissDirection.Right,
+            SharedFrameDismissDirection.Down,
+        )
+        assertEquals(SharedFrameDismissDirection.Left, SharedFrameMath.resolveDismissDirection(-40f, 2f, 8f, allowed))
+        assertEquals(SharedFrameDismissDirection.Right, SharedFrameMath.resolveDismissDirection(40f, 2f, 8f, allowed))
+        assertEquals(SharedFrameDismissDirection.Down, SharedFrameMath.resolveDismissDirection(2f, 40f, 8f, allowed))
+        assertNull(SharedFrameMath.resolveDismissDirection(2f, -40f, 8f, allowed))
+
+        val left = SharedFrameMath.dragTransform(-300f, 15f, 1000f, 2000f, SharedFrameDismissDirection.Left)
+        val right = SharedFrameMath.dragTransform(300f, 15f, 1000f, 2000f, SharedFrameDismissDirection.Right)
+        val down = SharedFrameMath.dragTransform(15f, 300f, 1000f, 2000f, SharedFrameDismissDirection.Down)
+        assertEquals(left.scale, right.scale, .001f)
+        assertEquals(right.scale, down.scale, .001f)
+        assertTrue(left.scale < 1f)
+        assertTrue(SharedFrameMath.dragTransform(-600f, 0f, 1000f, 2000f, SharedFrameDismissDirection.Left).scale < left.scale)
+    }
+
+    @Test fun directionAwareDismissUsesShortEdgeAndOutwardVelocity() {
+        val width = 1000f
+        val height = 2000f
+        fun finish(x: Float, y: Float, vx: Float, vy: Float, direction: SharedFrameDismissDirection) =
+            SharedFrameMath.shouldFinishDismiss(x, y, vx, vy, width, height, direction, 700f, .15f)
+
+        assertFalse(finish(-149f, 0f, -699f, 0f, SharedFrameDismissDirection.Left))
+        assertTrue(finish(-150f, 0f, 0f, 0f, SharedFrameDismissDirection.Left))
+        assertTrue(finish(-20f, 0f, -700f, 0f, SharedFrameDismissDirection.Left))
+        assertFalse(finish(-20f, 0f, 900f, 0f, SharedFrameDismissDirection.Left))
+        assertTrue(finish(150f, 0f, 0f, 0f, SharedFrameDismissDirection.Right))
+        assertTrue(finish(0f, 150f, 0f, 0f, SharedFrameDismissDirection.Down))
+        assertFalse(finish(0f, 20f, 0f, -900f, SharedFrameDismissDirection.Down))
+    }
+
+    @Test fun dragSlopIsRemovedWithoutAFirstFrameJump() {
+        assertEquals(DragOffset(0f, 0f), SharedFrameMath.dragOffsetAfterSlop(8f, 0f, 8f))
+        val offset = SharedFrameMath.dragOffsetAfterSlop(18f, 0f, 8f)
+        assertEquals(10f, offset.x, .001f)
+        assertEquals(0f, offset.y, .001f)
     }
 
     @Test fun invalidFramesAreRejected() {

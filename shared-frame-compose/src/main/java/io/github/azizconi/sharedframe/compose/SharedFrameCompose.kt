@@ -13,10 +13,12 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.Stable
+import androidx.compose.runtime.State
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateMapOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
 import androidx.compose.runtime.snapshotFlow
 import androidx.compose.runtime.withFrameNanos
@@ -51,6 +53,7 @@ import androidx.compose.ui.unit.dp
 import io.github.azizconi.sharedframe.core.Frame
 import io.github.azizconi.sharedframe.core.ImageTransform
 import io.github.azizconi.sharedframe.core.SharedFrameConfig
+import io.github.azizconi.sharedframe.core.SharedFrameDismissDirection
 import io.github.azizconi.sharedframe.core.SharedFrameGeometry
 import io.github.azizconi.sharedframe.core.SharedFrameMath
 import io.github.azizconi.sharedframe.core.SharedFramePhase
@@ -60,7 +63,6 @@ import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.flow.filterNotNull
 import kotlinx.coroutines.flow.first
 import kotlin.math.abs
-import kotlin.math.hypot
 
 internal data class SourceRegistration(
     val token: Long,
@@ -178,13 +180,24 @@ class SharedFrameComposeController internal constructor(
         return true
     }
 
-    internal fun updateDrag(totalX: Float, totalY: Float) {
+    internal fun updateDrag(
+        totalX: Float,
+        totalY: Float,
+        direction: SharedFrameDismissDirection,
+    ) {
         if (state.phase != SharedFramePhase.Dragging) return
         val parent = currentHostFrame() ?: return
         state = state.copy(
             render = state.render.copy(
                 prepared = true,
-                transform = SharedFrameMath.dragTransform(totalX, totalY, parent.width, config.minimumDragScale),
+                transform = SharedFrameMath.dragTransform(
+                    totalX,
+                    totalY,
+                    parent.width,
+                    parent.height,
+                    direction,
+                    config.minimumDragScale,
+                ),
                 mask = parent,
                 image = null,
                 radius = 0f,
@@ -399,12 +412,14 @@ class SharedFrameDetailScope internal constructor(
 fun SharedFrameHost(
     controller: SharedFrameComposeController,
     modifier: Modifier = Modifier,
+    canStartDismiss: (SharedFrameDismissDirection) -> Boolean = { true },
     detailContent: @Composable SharedFrameDetailScope.() -> Unit,
     content: @Composable BoxScope.() -> Unit,
 ) {
     val active = controller.activeSession()
     val operation = controller.operation()
     val density = androidx.compose.ui.platform.LocalDensity.current
+    val currentCanStartDismiss = rememberUpdatedState(canStartDismiss)
 
     DisposableEffect(controller) {
         onDispose { controller.disposeHost() }
@@ -428,7 +443,11 @@ fun SharedFrameHost(
         }
     }
 
-    Box(modifier.onGloballyPositioned(controller::registerHost)) {
+    Box(
+        modifier
+            .onGloballyPositioned(controller::registerHost)
+            .sharedFrameDrag(controller, active?.id, currentCanStartDismiss)
+    ) {
         content()
         if (active != null && controller.phase != SharedFramePhase.Hidden) {
             Box(
@@ -449,7 +468,6 @@ fun SharedFrameHost(
                     alpha = if (render.prepared) render.detailAlpha else 0f
                 }
                 .drawWithSharedFrameMask(controller)
-                .sharedFrameDrag(controller, active.id)
 
             Box(detailModifier) {
                 SharedFrameDetailScope(controller, active.id, active.key, active.painter).detailContent()
@@ -474,51 +492,82 @@ private fun Modifier.drawWithSharedFrameMask(controller: SharedFrameComposeContr
 
 private fun Modifier.sharedFrameDrag(
     controller: SharedFrameComposeController,
-    sessionId: Long,
+    sessionId: Long?,
+    canStartDismiss: State<(SharedFrameDismissDirection) -> Boolean>,
 ): Modifier = pointerInput(controller, sessionId) {
     awaitEachGesture {
         val down = awaitFirstDown(requireUnconsumed = false)
-        if (controller.phase != SharedFramePhase.Idle) return@awaitEachGesture
+        if (sessionId == null || controller.phase != SharedFramePhase.Idle) return@awaitEachGesture
 
         val pointerId: PointerId = down.id
-        val start = down.position
+        var start = down.position
         val tracker = VelocityTracker().also { it.addPosition(down.uptimeMillis, down.position) }
-        var horizontalLocked = false
-        var rejected = false
+        var direction: SharedFrameDismissDirection? = null
         var dragging = false
+        var downWasBlocked = false
 
-        while (true) {
-            val event = awaitPointerEvent()
-            val change = event.changes.firstOrNull { it.id == pointerId } ?: break
-            tracker.addPosition(change.uptimeMillis, change.position)
-            val total = change.position - start
+        try {
+            while (true) {
+                val event = awaitPointerEvent()
+                val change = event.changes.firstOrNull { it.id == pointerId } ?: break
+                tracker.addPosition(change.uptimeMillis, change.position)
+                var total = change.position - start
 
-            if (!horizontalLocked && !rejected && hypot(total.x.toDouble(), total.y.toDouble()) > viewConfiguration.touchSlop) {
-                horizontalLocked = abs(total.x) > abs(total.y) * 1.15f
-                rejected = !horizontalLocked
-                if (horizontalLocked) dragging = controller.beginDrag()
-            }
+                if (direction == null) {
+                    val downConfigured = SharedFrameDismissDirection.Down in controller.config.dismissDirections
+                    val downAllowed = downConfigured && canStartDismiss.value(SharedFrameDismissDirection.Down)
+                    val downDominant = total.y > 0f && abs(total.y) > abs(total.x)
+                    if (downDominant && !downAllowed) downWasBlocked = true
+                    if (downDominant && downAllowed && downWasBlocked) {
+                        start = change.position
+                        total = Offset.Zero
+                        downWasBlocked = false
+                    }
 
-            if (horizontalLocked && dragging) {
-                change.consume()
-                controller.updateDrag(total.x, total.y)
-            }
-
-            if (!change.pressed) {
-                if (dragging && controller.phase == SharedFramePhase.Dragging) {
-                    val velocity = tracker.calculateVelocity().x
-                    val width = size.width.toFloat().coerceAtLeast(1f)
-                    val finish = SharedFrameMath.shouldFinishDismiss(
+                    val allowed = controller.config.dismissDirections.filterTo(mutableSetOf()) {
+                        canStartDismiss.value(it)
+                    }
+                    direction = SharedFrameMath.resolveDismissDirection(
                         total.x,
-                        velocity,
-                        width,
-                        controller.config.minimumFlingVelocityDp * density,
-                        controller.config.dismissDistanceFraction,
+                        total.y,
+                        viewConfiguration.touchSlop,
+                        allowed,
                     )
-                    if (finish) controller.finishDrag() else controller.cancelDrag()
+                    if (direction != null) dragging = controller.beginDrag()
                 }
-                break
+
+                val lockedDirection = direction
+                if (lockedDirection != null && dragging) {
+                    val effective = SharedFrameMath.dragOffsetAfterSlop(
+                        total.x,
+                        total.y,
+                        viewConfiguration.touchSlop,
+                    )
+                    change.consume()
+                    controller.updateDrag(effective.x, effective.y, lockedDirection)
+
+                    if (!change.pressed && controller.phase == SharedFramePhase.Dragging) {
+                        val velocity = tracker.calculateVelocity()
+                        val finish = SharedFrameMath.shouldFinishDismiss(
+                            effective.x,
+                            effective.y,
+                            velocity.x,
+                            velocity.y,
+                            size.width.toFloat(),
+                            size.height.toFloat(),
+                            lockedDirection,
+                            controller.config.minimumFlingVelocityDp * density,
+                            controller.config.dismissDistanceFraction,
+                        )
+                        if (finish) controller.finishDrag() else controller.cancelDrag()
+                        dragging = false
+                    }
+                }
+
+                if (!change.pressed) break
             }
+        } finally {
+            if (dragging && controller.phase == SharedFramePhase.Dragging) controller.cancelDrag()
         }
     }
 }

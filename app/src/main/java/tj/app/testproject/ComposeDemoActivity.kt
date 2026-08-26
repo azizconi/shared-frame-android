@@ -114,7 +114,7 @@ private fun ComposeDemo() {
                     Spacer(Modifier.height(8.dp))
                     Text("The same reusable controller works from carousel, grid and list images.", color = Color(0xFF5C5C5C), fontSize = 15.sp)
                     Spacer(Modifier.height(24.dp))
-                    Text("Drag horizontally to dismiss", color = Color(0xFF8A8A8A), fontSize = 13.sp)
+                    Text("Swipe left, right, or down to dismiss", color = Color(0xFF8A8A8A), fontSize = 13.sp)
                 }
             }
         },

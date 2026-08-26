@@ -10,6 +10,6 @@
         <TextView android:layout_width="match_parent" android:layout_height="wrap_content" android:text="♡   ◯   ⤴" android:textColor="#171717" android:textSize="28sp" />
         <TextView android:id="@+id/detail_title" android:layout_width="match_parent" android:layout_height="wrap_content" android:layout_marginTop="18dp" android:textColor="#171717" android:textSize="18sp" android:textStyle="bold" />
         <TextView android:layout_width="match_parent" android:layout_height="wrap_content" android:layout_marginTop="8dp" android:text="The same reusable controller works from carousel, grid and list images." android:textColor="#5C5C5C" android:textSize="15sp" />
-        <TextView android:layout_width="match_parent" android:layout_height="wrap_content" android:layout_marginTop="24dp" android:text="Drag horizontally to dismiss" android:textColor="#8A8A8A" android:textSize="13sp" />
+        <TextView android:layout_width="match_parent" android:layout_height="wrap_content" android:layout_marginTop="24dp" android:text="Swipe left, right, or down to dismiss" android:textColor="#8A8A8A" android:textSize="13sp" />
     </LinearLayout>
 </LinearLayout>

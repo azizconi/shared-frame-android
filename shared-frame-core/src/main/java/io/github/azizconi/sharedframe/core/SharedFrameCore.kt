@@ -1,5 +1,7 @@
 package io.github.azizconi.sharedframe.core
 
+import kotlin.math.abs
+import kotlin.math.hypot
 import kotlin.math.max
 import kotlin.math.min
 
@@ -28,9 +30,18 @@ data class SharedFrameConfig(
     val easing: CubicBezier = CubicBezier(.25f, .1f, .25f, 1f),
     val scrimAlpha: Float = .34f,
     val minimumDragScale: Float = .6f,
-    val dismissDistanceFraction: Float = .25f,
-    val minimumFlingVelocityDp: Float = 1100f,
+    val dismissDistanceFraction: Float = .15f,
+    val minimumFlingVelocityDp: Float = 700f,
+    val dismissDirections: Set<SharedFrameDismissDirection> = setOf(
+        SharedFrameDismissDirection.Left,
+        SharedFrameDismissDirection.Right,
+        SharedFrameDismissDirection.Down,
+    ),
 )
+
+enum class SharedFrameDismissDirection { Left, Right, Down }
+
+data class DragOffset(val x: Float, val y: Float)
 
 enum class SharedFramePhase { Hidden, Opening, Idle, Dragging, CancellingDrag, Closing }
 
@@ -124,6 +135,60 @@ object SharedFrameMath {
         )
     }
 
+    fun resolveDismissDirection(
+        totalDragX: Float,
+        totalDragY: Float,
+        touchSlopPx: Float,
+        allowedDirections: Set<SharedFrameDismissDirection>,
+        dominanceRatio: Float = 1.15f,
+    ): SharedFrameDismissDirection? {
+        if (!totalDragX.isFinite() || !totalDragY.isFinite() || allowedDirections.isEmpty()) return null
+        val x = abs(totalDragX)
+        val y = abs(totalDragY)
+        val distance = hypot(x, y)
+        val slop = touchSlopPx.coerceAtLeast(0f)
+        if (distance <= slop) return null
+
+        val horizontal = if (totalDragX < 0f) SharedFrameDismissDirection.Left else SharedFrameDismissDirection.Right
+        if (x >= y * dominanceRatio && horizontal in allowedDirections) return horizontal
+        if (totalDragY > 0f && y >= x * dominanceRatio && SharedFrameDismissDirection.Down in allowedDirections) {
+            return SharedFrameDismissDirection.Down
+        }
+
+        if (distance >= slop * 2f) {
+            if (x >= y && horizontal in allowedDirections) return horizontal
+            if (totalDragY > 0f && SharedFrameDismissDirection.Down in allowedDirections) {
+                return SharedFrameDismissDirection.Down
+            }
+        }
+        return null
+    }
+
+    fun dragOffsetAfterSlop(totalDragX: Float, totalDragY: Float, touchSlopPx: Float): DragOffset {
+        if (!totalDragX.isFinite() || !totalDragY.isFinite()) return DragOffset(0f, 0f)
+        val distance = hypot(totalDragX, totalDragY)
+        if (distance <= 0f) return DragOffset(0f, 0f)
+        val factor = ((distance - touchSlopPx.coerceAtLeast(0f)) / distance).coerceIn(0f, 1f)
+        return DragOffset(totalDragX * factor, totalDragY * factor)
+    }
+
+    fun dragTransform(
+        totalDragX: Float,
+        totalDragY: Float,
+        containerWidthPx: Float,
+        containerHeightPx: Float,
+        direction: SharedFrameDismissDirection,
+        minimumScale: Float = .6f,
+    ): UniformTransform {
+        val reference = min(containerWidthPx, containerHeightPx).coerceAtLeast(1f)
+        val progress = (projectedTravel(totalDragX, totalDragY, direction) / reference).coerceIn(0f, 1f)
+        return UniformTransform(
+            (1f - progress * (1f - minimumScale)).coerceIn(minimumScale, 1f),
+            totalDragX,
+            totalDragY,
+        )
+    }
+
     fun shouldFinishDismiss(
         totalDragX: Float,
         velocityXPxPerSecond: Float,
@@ -132,6 +197,36 @@ object SharedFrameMath {
         distanceFraction: Float = .25f,
     ): Boolean = totalDragX >= containerWidthPx * distanceFraction ||
         velocityXPxPerSecond >= minimumFlingVelocityPxPerSecond
+
+    fun shouldFinishDismiss(
+        totalDragX: Float,
+        totalDragY: Float,
+        velocityXPxPerSecond: Float,
+        velocityYPxPerSecond: Float,
+        containerWidthPx: Float,
+        containerHeightPx: Float,
+        direction: SharedFrameDismissDirection,
+        minimumFlingVelocityPxPerSecond: Float,
+        distanceFraction: Float = .15f,
+    ): Boolean {
+        val reference = min(containerWidthPx, containerHeightPx).coerceAtLeast(1f)
+        val distance = projectedTravel(totalDragX, totalDragY, direction)
+        val velocity = projectedVelocity(velocityXPxPerSecond, velocityYPxPerSecond, direction)
+        return distance >= reference * distanceFraction.coerceAtLeast(0f) ||
+            velocity >= minimumFlingVelocityPxPerSecond.coerceAtLeast(0f)
+    }
+
+    private fun projectedTravel(x: Float, y: Float, direction: SharedFrameDismissDirection): Float = when (direction) {
+        SharedFrameDismissDirection.Left -> (-x).coerceAtLeast(0f)
+        SharedFrameDismissDirection.Right -> x.coerceAtLeast(0f)
+        SharedFrameDismissDirection.Down -> y.coerceAtLeast(0f)
+    }
+
+    private fun projectedVelocity(x: Float, y: Float, direction: SharedFrameDismissDirection): Float = when (direction) {
+        SharedFrameDismissDirection.Left -> -x
+        SharedFrameDismissDirection.Right -> x
+        SharedFrameDismissDirection.Down -> y
+    }
 
     fun centerCropTransform(
         contentWidth: Float,

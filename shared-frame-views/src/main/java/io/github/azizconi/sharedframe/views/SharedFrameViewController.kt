@@ -18,6 +18,7 @@ import androidx.core.animation.doOnEnd
 import io.github.azizconi.sharedframe.core.Frame
 import io.github.azizconi.sharedframe.core.ImageTransform
 import io.github.azizconi.sharedframe.core.SharedFrameConfig
+import io.github.azizconi.sharedframe.core.SharedFrameDismissDirection
 import io.github.azizconi.sharedframe.core.SharedFrameGeometry
 import io.github.azizconi.sharedframe.core.SharedFrameMath
 import io.github.azizconi.sharedframe.core.SharedFramePhase
@@ -31,6 +32,7 @@ data class SharedFrameViewRequest(
     val sourceRadiusPx: Float = 0f,
     val detailRoot: View,
     val detailHero: ImageView,
+    val canStartDismiss: (SharedFrameDismissDirection) -> Boolean = { true },
     val onShown: () -> Unit = {},
     val onHidden: () -> Unit = {},
 )
@@ -71,15 +73,21 @@ class SharedFrameViewController(
     private var downY = 0f
     private var dragX = 0f
     private var dragY = 0f
-    private var horizontalLocked = false
-    private var gestureRejected = false
+    private var activePointerId = MotionEvent.INVALID_POINTER_ID
+    private var dragDirection: SharedFrameDismissDirection? = null
+    private var downWasBlocked = false
+    private var lastDragTransform = UniformTransform.Identity
+    private var lastTrackedEventTime = Long.MIN_VALUE
     private val touchSlop = ViewConfiguration.get(host.context).scaledTouchSlop.toFloat()
     private val minimumFlingVelocity = config.minimumFlingVelocityDp * host.resources.displayMetrics.density
 
     init {
         host.addView(scrim, FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT))
         host.addView(overlay, FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT))
-        overlay.setOnTouchListener { _, event -> handleTouch(event) }
+        overlay.gestureDelegate = object : MaskedFrameLayout.GestureDelegate {
+            override fun onInterceptTouchEvent(event: MotionEvent): Boolean = handleInterceptTouch(event)
+            override fun onTouchEvent(event: MotionEvent): Boolean = handleTouch(event)
+        }
     }
 
     fun open(newRequest: SharedFrameViewRequest): Boolean {
@@ -140,7 +148,7 @@ class SharedFrameViewController(
     fun close(): Boolean {
         val active = request ?: return false
         if (!stateMachine.beginClose()) return false
-        if (!active.sourceHero.isAttachedToWindow) {
+        if (!sourceIsAvailable(active)) {
             fadeClose()
             return true
         }
@@ -175,6 +183,8 @@ class SharedFrameViewController(
         animator = null
         velocityTracker?.recycle()
         velocityTracker = null
+        activePointerId = MotionEvent.INVALID_POINTER_ID
+        dragDirection = null
         request?.sourceHero?.alpha = 1f
         (scrim.parent as? ViewGroup)?.removeView(scrim)
         (overlay.parent as? ViewGroup)?.removeView(overlay)
@@ -207,70 +217,162 @@ class SharedFrameViewController(
         active.detailHero.frameRelativeTo(host),
     )
 
-    private fun handleTouch(event: MotionEvent): Boolean {
+    private fun handleInterceptTouch(event: MotionEvent): Boolean {
         when (event.actionMasked) {
             MotionEvent.ACTION_DOWN -> {
-                if (phase != SharedFramePhase.Idle) return false
-                downX = event.x; downY = event.y; dragX = 0f; dragY = 0f
-                horizontalLocked = false; gestureRejected = false
-                velocityTracker?.recycle()
-                velocityTracker = VelocityTracker.obtain().also { it.addMovement(event) }
-                return true
+                startGesture(event)
+                return false
             }
             MotionEvent.ACTION_MOVE -> {
                 if (phase != SharedFramePhase.Idle && phase != SharedFramePhase.Dragging) return false
-                velocityTracker?.addMovement(event)
-                dragX = event.x - downX; dragY = event.y - downY
-                if (!horizontalLocked && !gestureRejected && kotlin.math.hypot(dragX.toDouble(), dragY.toDouble()) > touchSlop) {
-                    horizontalLocked = kotlin.math.abs(dragX) > kotlin.math.abs(dragY) * 1.15f
-                    gestureRejected = !horizontalLocked
+                trackRawMovement(event)
+                maybeBeginDrag(event)
+                return phase == SharedFramePhase.Dragging
+            }
+            MotionEvent.ACTION_POINTER_UP -> {
+                if (event.getPointerId(event.actionIndex) == activePointerId) {
+                    if (phase == SharedFramePhase.Dragging) return true
+                    resetGesture()
                 }
-                if (horizontalLocked) {
-                    if (phase == SharedFramePhase.Idle) stateMachine.beginDrag()
-                    updateDrag()
-                }
+            }
+            MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> if (phase != SharedFramePhase.Dragging) resetGesture()
+        }
+        return phase == SharedFramePhase.Dragging
+    }
+
+    private fun handleTouch(event: MotionEvent): Boolean {
+        when (event.actionMasked) {
+            MotionEvent.ACTION_DOWN -> return startGesture(event)
+            MotionEvent.ACTION_MOVE -> {
+                if (phase != SharedFramePhase.Idle && phase != SharedFramePhase.Dragging) return false
+                trackRawMovement(event)
+                maybeBeginDrag(event)
+                if (phase == SharedFramePhase.Dragging) updateDrag(event)
+                return true
+            }
+            MotionEvent.ACTION_POINTER_UP -> {
+                if (event.getPointerId(event.actionIndex) == activePointerId) finishGesture(event, cancelled = true)
                 return true
             }
             MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> {
-                velocityTracker?.addMovement(event)
-                if (phase == SharedFramePhase.Dragging) {
-                    velocityTracker?.computeCurrentVelocity(1000)
-                    val finish = event.actionMasked != MotionEvent.ACTION_CANCEL && SharedFrameMath.shouldFinishDismiss(
-                        dragX,
-                        velocityTracker?.xVelocity ?: 0f,
-                        overlay.width.toFloat(),
-                        minimumFlingVelocity,
-                        config.dismissDistanceFraction,
-                    )
-                    if (finish) finishDrag() else cancelDrag()
-                }
-                velocityTracker?.recycle(); velocityTracker = null
+                finishGesture(event, cancelled = event.actionMasked == MotionEvent.ACTION_CANCEL)
                 return true
             }
         }
-        return false
+        return phase == SharedFramePhase.Dragging
     }
 
-    private fun dragTransform() = SharedFrameMath.dragTransform(
-        dragX,
-        dragY,
-        overlay.width.toFloat(),
-        config.minimumDragScale,
-    )
+    private fun startGesture(event: MotionEvent): Boolean {
+        if (phase != SharedFramePhase.Idle) return false
+        activePointerId = event.getPointerId(0)
+        downX = event.rawX
+        downY = event.rawY
+        dragX = 0f
+        dragY = 0f
+        dragDirection = null
+        downWasBlocked = false
+        lastDragTransform = UniformTransform.Identity
+        velocityTracker?.recycle()
+        velocityTracker = VelocityTracker.obtain()
+        lastTrackedEventTime = Long.MIN_VALUE
+        trackRawMovement(event)
+        return true
+    }
 
-    private fun updateDrag() {
-        overlay.applyTransform(dragTransform())
-        overlay.maskFrame = geometry?.expandedMask?.toRectF()
+    private fun maybeBeginDrag(event: MotionEvent) {
+        if (dragDirection != null || activePointerId == MotionEvent.INVALID_POINTER_ID) return
+        val index = event.findPointerIndex(activePointerId)
+        if (index < 0) return
+        var totalX = event.rawX - downX
+        var totalY = event.rawY - downY
+        val active = request ?: return
+        val downConfigured = SharedFrameDismissDirection.Down in config.dismissDirections
+        val downAllowed = downConfigured && active.canStartDismiss(SharedFrameDismissDirection.Down)
+        val downDominant = totalY > 0f && kotlin.math.abs(totalY) > kotlin.math.abs(totalX)
+        if (downDominant && !downAllowed) downWasBlocked = true
+        if (downDominant && downAllowed && downWasBlocked) {
+            downX = event.rawX
+            downY = event.rawY
+            totalX = 0f
+            totalY = 0f
+            downWasBlocked = false
+            velocityTracker?.recycle()
+            velocityTracker = VelocityTracker.obtain()
+            lastTrackedEventTime = Long.MIN_VALUE
+            trackRawMovement(event)
+        }
+
+        val allowed = config.dismissDirections.filterTo(mutableSetOf()) { active.canStartDismiss(it) }
+        val resolved = SharedFrameMath.resolveDismissDirection(totalX, totalY, touchSlop, allowed) ?: return
+        if (!stateMachine.beginDrag()) return
+        dragDirection = resolved
+        overlay.maskFrame = (geometry?.expandedMask ?: Frame(0f, 0f, overlay.width.toFloat(), overlay.height.toFloat())).toRectF()
         overlay.maskRadius = 0f
         scrim.alpha = config.scrimAlpha
     }
 
+    private fun updateDrag(event: MotionEvent) {
+        val direction = dragDirection ?: return
+        val offset = SharedFrameMath.dragOffsetAfterSlop(event.rawX - downX, event.rawY - downY, touchSlop)
+        dragX = offset.x
+        dragY = offset.y
+        lastDragTransform = SharedFrameMath.dragTransform(
+            dragX,
+            dragY,
+            overlay.width.toFloat(),
+            overlay.height.toFloat(),
+            direction,
+            config.minimumDragScale,
+        )
+        overlay.applyTransform(lastDragTransform)
+    }
+
+    private fun finishGesture(event: MotionEvent, cancelled: Boolean) {
+        trackRawMovement(event)
+        if (phase == SharedFramePhase.Dragging) {
+            if (!cancelled) updateDrag(event)
+            velocityTracker?.computeCurrentVelocity(1000)
+            val direction = dragDirection
+            val finish = !cancelled && direction != null && SharedFrameMath.shouldFinishDismiss(
+                dragX,
+                dragY,
+                velocityTracker?.getXVelocity(activePointerId) ?: 0f,
+                velocityTracker?.getYVelocity(activePointerId) ?: 0f,
+                overlay.width.toFloat(),
+                overlay.height.toFloat(),
+                direction,
+                minimumFlingVelocity,
+                config.dismissDistanceFraction,
+            )
+            if (finish) finishDrag() else cancelDrag()
+        }
+        resetGesture()
+    }
+
+    private fun trackRawMovement(event: MotionEvent) {
+        if (event.eventTime == lastTrackedEventTime) return
+        val rawEvent = MotionEvent.obtain(event)
+        rawEvent.setLocation(event.rawX, event.rawY)
+        velocityTracker?.addMovement(rawEvent)
+        rawEvent.recycle()
+        lastTrackedEventTime = event.eventTime
+    }
+
+    private fun resetGesture() {
+        velocityTracker?.recycle()
+        velocityTracker = null
+        activePointerId = MotionEvent.INVALID_POINTER_ID
+        dragDirection = null
+        downWasBlocked = false
+        lastTrackedEventTime = Long.MIN_VALUE
+    }
+
     private fun cancelDrag() {
-        val calculated = geometry ?: return showExpandedImmediately()
-        stateMachine.cancelDrag()
+        if (!stateMachine.cancelDrag()) return
+        val expanded = geometry?.expandedMask ?: Frame(0f, 0f, overlay.width.toFloat(), overlay.height.toFloat())
         animate(
-            dragTransform(), UniformTransform.Identity,
-            calculated.expandedMask, calculated.expandedMask,
+            lastDragTransform, UniformTransform.Identity,
+            expanded, expanded,
             0f, 0f, config.scrimAlpha, config.scrimAlpha,
         ) { stateMachine.finishCancel() }
     }
@@ -278,8 +380,8 @@ class SharedFrameViewController(
     private fun finishDrag() {
         val active = request ?: return hide()
         if (!stateMachine.beginClose()) return
-        if (!active.sourceHero.isAttachedToWindow) return fadeClose()
-        val current = dragTransform()
+        if (!sourceIsAvailable(active)) return fadeClose()
+        val current = lastDragTransform
         val calculated = buildGeometry(active) ?: return fadeClose()
         val image = buildClosingImageTransition(active, current) ?: return fadeClose()
         geometry = calculated
@@ -347,6 +449,7 @@ class SharedFrameViewController(
 
     private fun hide() {
         clearPendingOpen()
+        resetGesture()
         val active = request
         active?.detailHero?.scaleType = ImageView.ScaleType.CENTER_CROP
         overlay.apply { visibility = View.GONE; alpha = 1f; maskFrame = null; applyTransform(UniformTransform.Identity) }
@@ -436,6 +539,16 @@ class SharedFrameViewController(
         scaleX = transform.scale; scaleY = transform.scale
         translationX = transform.translationX; translationY = transform.translationY
     }
+
+    private fun sourceIsAvailable(active: SharedFrameViewRequest): Boolean {
+        if (!active.sourceHero.isAttachedToWindow || active.sourceHero.visibility != View.VISIBLE) return false
+        val source = active.sourceHero.frameRelativeTo(host)
+        val hostFrame = Frame(0f, 0f, host.width.toFloat(), host.height.toFloat())
+        return source.isUsable() && hostFrame.isUsable() && source.intersects(hostFrame)
+    }
+
+    private fun Frame.intersects(other: Frame): Boolean =
+        left < other.right && right > other.left && top < other.bottom && bottom > other.top
 
     private fun Frame.toRectF() = RectF(left, top, right, bottom)
     private fun lerp(a: Float, b: Float, t: Float) = a + (b - a) * t

@@ -2,7 +2,7 @@
 
 Gesture-driven shared-frame image transitions for Android Views and Jetpack Compose.
 
-SharedFrame expands a loaded image from any carousel, grid, list, or custom layout into arbitrary detail content. The transition keeps the source crop continuous, clips the complete detail surface, supports Back, and can be dismissed with an iOS-style rightward drag.
+SharedFrame expands a loaded image from any carousel, grid, list, or custom layout into arbitrary detail content. The transition keeps the source crop continuous, clips the complete detail surface, supports Back, and can be dismissed with a smooth drag left, right, or down.
 
 > `0.1.0-alpha01` is the first public preview. Feedback and API suggestions are welcome.
 
@@ -11,7 +11,7 @@ SharedFrame expands a loaded image from any carousel, grid, list, or custom layo
 - Views/XML and Jetpack Compose adapters with matching behavior
 - Atomic first frame without a full-screen flash
 - Continuous `Crop` and `Fit` interpolation across different aspect ratios
-- Rightward interactive dismiss, cancel, and velocity/distance completion
+- Interactive left, right, and downward dismiss with stable finger tracking
 - Fade fallback when a recycled source is no longer on screen
 - Image-loader agnostic library modules
 - Android API 26+
@@ -70,6 +70,14 @@ override fun onDestroy() {
 
 Only call `open` after the drawable is loaded and both source/detail can be measured.
 
+For a scrollable detail, allow downward dismiss only when its scroll container is already at the top:
+
+```kotlin
+canStartDismiss = { direction ->
+    direction != SharedFrameDismissDirection.Down || !detailScroll.canScrollVertically(-1)
+}
+```
+
 ## Jetpack Compose
 
 Place content inside one `SharedFrameHost`, register loaded source painters, and mark the hero inside detail content:
@@ -112,14 +120,23 @@ SharedFrameHost(
 
 The source modifier must receive a painter with a finite intrinsic size. Register it after the loader reports success. Pass the actual, independent `ContentScale` to both source and detail registration. The first preview deliberately supports `ContentScale.Crop` and `ContentScale.Fit`; unsupported non-uniform scales fail fast instead of producing a broken morph.
 
+The same top-boundary rule can be supplied to `SharedFrameHost` when detail contains a `LazyColumn` or another vertical scroller:
+
+```kotlin
+canStartDismiss = { direction ->
+    direction != SharedFrameDismissDirection.Down || !detailListState.canScrollBackward
+}
+```
+
 ## Default motion
 
 - Duration: 250 ms
 - Easing: cubic Bézier `(0.25, 0.1, 0.25, 1)`
 - Scrim alpha: `0.34`
 - Minimum drag scale: `0.6`
-- Distance threshold: `25%`
-- Velocity threshold: `1100 dp/s`
+- Dismiss directions: left, right, and down
+- Distance threshold: `15%` of the host's shorter side
+- Velocity threshold: `700 dp/s`
 
 Override these values with `SharedFrameConfig`.
 
