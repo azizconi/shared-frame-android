@@ -127,7 +127,13 @@ Override these values with `SharedFrameConfig`.
 
 The `app` module contains equivalent Views and Compose feeds with carousel, grid, and vertical-list sources. Every transition uses the same loaded drawable/painter on both sides.
 
-https://github.com/user-attachments/assets/f5394699-aa79-4a1a-9dd7-b4cdc5a5bd64
+### Views / XML
+
+<video src="https://github.com/user-attachments/assets/8216281b-e31d-4de9-9dd5-c0c51ab62305" controls playsinline></video>
+
+### Jetpack Compose
+
+<video src="https://github.com/user-attachments/assets/e745188c-6031-4a8b-be9c-4e27b398cbdd" controls playsinline></video>
 
 ## Building
 
