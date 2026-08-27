@@ -4,7 +4,7 @@ Gesture-driven shared-frame image transitions for Android Views and Jetpack Comp
 
 SharedFrame expands a loaded image from any carousel, grid, list, or custom layout into arbitrary detail content. The transition keeps the source crop continuous, clips the complete detail surface, supports Back, and can be dismissed with a smooth drag left, right, or down.
 
-> `0.1.0-alpha01` is the first public preview. Feedback and API suggestions are welcome.
+> `0.1.0-alpha02` is the current public preview. It brings Compose to Views parity, stabilizes multidirectional drag-to-dismiss, and keeps detail content fully opaque during geometric reveal and collapse.
 
 ## Features
 
@@ -18,7 +18,7 @@ SharedFrame expands a loaded image from any carousel, grid, list, or custom layo
 
 ## Installation
 
-`0.1.0-alpha01` is the first release candidate. Until the Maven Central signing
+`0.1.0-alpha02` is the current release candidate. Until the Maven Central signing
 secrets are configured, clone the repository and include the required modules in
 your Gradle build. After publication, choose the adapter for your UI stack:
 
@@ -29,9 +29,9 @@ repositories {
 }
 
 dependencies {
-    implementation("io.github.azizconi:shared-frame-views:0.1.0-alpha01")
+    implementation("io.github.azizconi:shared-frame-views:0.1.0-alpha02")
     // or
-    implementation("io.github.azizconi:shared-frame-compose:0.1.0-alpha01")
+    implementation("io.github.azizconi:shared-frame-compose:0.1.0-alpha02")
 }
 ```
 
@@ -146,11 +146,11 @@ The `app` module contains equivalent Views and Compose feeds with carousel, grid
 
 ### Views / XML
 
-<video src="https://github.com/user-attachments/assets/79360618-f760-4bdf-8dce-a5058a2d412f" controls playsinline></video>
+<video src="https://github.com/user-attachments/assets/70ac1f99-d041-408a-9671-ed6cb7ed9f43" controls playsinline></video>
 
 ### Jetpack Compose
 
-<video src="https://github.com/user-attachments/assets/f90437a4-9624-4620-a808-efde2a5ae52f" controls playsinline></video>
+<video src="https://github.com/user-attachments/assets/5c68c521-a3bb-42f8-b88a-65698822a1ba" controls playsinline></video>
 
 ## Building
 
