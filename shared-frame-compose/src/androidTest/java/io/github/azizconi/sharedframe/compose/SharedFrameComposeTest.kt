@@ -116,6 +116,66 @@ class SharedFrameComposeTest {
     }
 
     @Test
+    fun sharedFrameChromeStaysOpaqueAndIsRevealedOnlyByGeometry() {
+        lateinit var controller: SharedFrameComposeController
+        val painter = PatternPainter()
+        compose.mainClock.autoAdvance = false
+        compose.setContent {
+            controller = rememberSharedFrameController()
+            TestHost(controller, painter, remember { mutableStateOf(true) })
+        }
+        compose.mainClock.advanceTimeByFrame()
+        compose.waitForIdle()
+        compose.runOnIdle { assertTrue(controller.open(KEY)) }
+        advanceUntil { controller.renderState().prepared }
+        compose.mainClock.advanceTimeByFrame()
+        compose.mainClock.advanceTimeByFrame()
+        compose.waitForIdle()
+
+        val openingZero = controller.renderState()
+        assertEquals(null, openingZero.fallbackAlpha)
+        val openingZeroArea = checkNotNull(openingZero.mask).area
+
+        compose.mainClock.advanceTimeBy(125)
+        compose.waitForIdle()
+        val openingMiddle = controller.renderState()
+        assertEquals(null, openingMiddle.fallbackAlpha)
+        assertTrue(checkNotNull(openingMiddle.mask).area > openingZeroArea)
+        assertTrue(openingMiddle.transform.scale > openingZero.transform.scale)
+        assertNodeCenterColor(HEADER, Color(0xFF00BCD4))
+
+        compose.mainClock.advanceTimeBy(124)
+        compose.waitForIdle()
+        val openingNearEnd = controller.renderState()
+        assertEquals(null, openingNearEnd.fallbackAlpha)
+        assertTrue(checkNotNull(openingNearEnd.mask).area >= checkNotNull(openingMiddle.mask).area)
+        assertNodeCenterColor(BODY, Color(0xFFE91E63))
+
+        compose.mainClock.advanceTimeBy(1)
+        advanceUntil { controller.phase == SharedFramePhase.Idle }
+        assertEquals(null, controller.renderState().fallbackAlpha)
+
+        compose.runOnIdle { assertTrue(controller.close()) }
+        advanceUntil { controller.renderState().image != null }
+        compose.mainClock.advanceTimeByFrame()
+        compose.mainClock.advanceTimeByFrame()
+        compose.waitForIdle()
+        val closingZero = controller.renderState()
+        assertEquals(null, closingZero.fallbackAlpha)
+        val closingZeroArea = checkNotNull(closingZero.mask).area
+
+        compose.mainClock.advanceTimeBy(125)
+        compose.waitForIdle()
+        val closingMiddle = controller.renderState()
+        assertEquals(null, closingMiddle.fallbackAlpha)
+        assertTrue(checkNotNull(closingMiddle.mask).area < closingZeroArea)
+        assertTrue(closingMiddle.transform.scale < closingZero.transform.scale)
+
+        compose.mainClock.advanceTimeBy(125)
+        advanceUntil { controller.phase == SharedFramePhase.Hidden }
+    }
+
+    @Test
     fun draggedCloseKeepsReleaseFrameAndHandsOffAtTheExactSourceFrame() {
         lateinit var controller: SharedFrameComposeController
         val painter = PatternPainter()
@@ -328,12 +388,12 @@ class SharedFrameComposeTest {
         compose.waitForIdle()
         compose.runOnIdle { assertTrue(controller.close()) }
         advanceUntil { controller.phase == SharedFramePhase.Closing && controller.renderState().hiddenSourceToken == null }
-        assertEquals(1f, controller.renderState().detailAlpha, .001f)
+        assertEquals(1f, controller.renderState().fallbackAlpha ?: 0f, .001f)
 
         compose.mainClock.advanceTimeBy(125)
         compose.waitForIdle()
         assertEquals(SharedFramePhase.Closing, controller.phase)
-        assertTrue(controller.renderState().detailAlpha in .05f..0.95f)
+        assertTrue(checkNotNull(controller.renderState().fallbackAlpha) in .05f..0.95f)
         assertNotNull(compose.onNodeWithTag(DETAIL).captureToImage())
 
         advanceUntil { controller.phase == SharedFramePhase.Hidden }
@@ -399,7 +459,16 @@ class SharedFrameComposeTest {
         assertEquals(expected.translationY, actual.translationY, .001f)
     }
 
+    private fun assertNodeCenterColor(tag: String, expected: Color) {
+        val host = compose.onNodeWithTag(HOST).fetchSemanticsNode().boundsInRoot
+        val node = compose.onNodeWithTag(tag).fetchSemanticsNode().boundsInRoot.relativeTo(host)
+        val pixels = compose.onNodeWithTag(HOST).captureToImage().toPixelMap()
+        val actual = pixels[node.center.x.toInt(), node.center.y.toInt()]
+        assertTrue("$tag must stay opaque; expected $expected, got $actual", actual.distance(expected) < .12f)
+    }
+
     private fun Rect.relativeTo(parent: Rect) = translate(Offset(-parent.left, -parent.top))
+    private val io.github.azizconi.sharedframe.core.Frame.area get() = width * height
     private fun Color.distance(other: Color) =
         abs(red - other.red) + abs(green - other.green) + abs(blue - other.blue) + abs(alpha - other.alpha)
 
@@ -412,6 +481,7 @@ class SharedFrameComposeTest {
         private const val HOST = "host"
         private const val SOURCE = "source"
         private const val HEADER = "header"
+        private const val BODY = "body"
         private const val DETAIL = "detail"
         private const val DETAIL_ACTION = "detail_action"
     }
@@ -515,6 +585,13 @@ private fun TestHost(
                             .height(220.dp)
                             .testTag("hero")
                             .sharedFrameDetailHero(ContentScale.Fit),
+                    )
+                    Box(
+                        Modifier
+                            .fillMaxWidth()
+                            .height(120.dp)
+                            .background(Color(0xFFE91E63))
+                            .testTag("body")
                     )
                 }
             },

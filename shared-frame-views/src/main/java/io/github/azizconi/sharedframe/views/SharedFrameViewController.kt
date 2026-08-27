@@ -40,6 +40,7 @@ data class SharedFrameViewRequest(
 
 internal data class SharedFrameViewRenderSnapshot(
     val transform: UniformTransform,
+    val overlayAlpha: Float,
     val imageLocal: ImageTransform?,
     val parent: Frame?,
     val hero: Frame?,
@@ -209,6 +210,7 @@ class SharedFrameViewController(
         val prepared = preparedFrames
         return SharedFrameViewRenderSnapshot(
             transform = UniformTransform(overlay.scaleX, overlay.translationX, overlay.translationY),
+            overlayAlpha = overlay.alpha,
             imageLocal = request?.detailHero?.imageTransform(),
             parent = prepared?.parent,
             hero = prepared?.hero,
@@ -447,6 +449,7 @@ class SharedFrameViewController(
         onEnd: () -> Unit,
     ) {
         animator?.cancel()
+        overlay.alpha = 1f
         val hero = request?.detailHero
         if (image != null && hero != null) {
             hero.scaleType = ImageView.ScaleType.MATRIX

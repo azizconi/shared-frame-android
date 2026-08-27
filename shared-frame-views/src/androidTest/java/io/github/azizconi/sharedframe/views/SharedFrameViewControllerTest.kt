@@ -38,6 +38,59 @@ class SharedFrameTestActivity : Activity() {
 @RunWith(AndroidJUnit4::class)
 class SharedFrameViewControllerTest {
     @Test
+    fun sharedFrameAnimatorKeepsTheWholeDetailOverlayOpaque() {
+        ActivityScenario.launch(SharedFrameTestActivity::class.java).use { scenario ->
+            val started = CountDownLatch(1)
+            val opened = CountDownLatch(1)
+            lateinit var controller: SharedFrameViewController
+            scenario.onActivity { activity ->
+                val bitmap = Bitmap.createBitmap(120, 90, Bitmap.Config.ARGB_8888).apply { eraseColor(Color.BLUE) }
+                val drawable = BitmapDrawable(activity.resources, bitmap)
+                val source = ImageView(activity).apply {
+                    scaleType = ImageView.ScaleType.CENTER_CROP
+                    setImageDrawable(drawable)
+                }
+                activity.host.addView(source, FrameLayout.LayoutParams(240, 180).apply {
+                    leftMargin = 60
+                    topMargin = 500
+                })
+                val detail = FrameLayout(activity).apply { setBackgroundColor(Color.WHITE) }
+                val hero = ImageView(activity).apply { scaleType = ImageView.ScaleType.CENTER_CROP }
+                detail.addView(hero, FrameLayout.LayoutParams(FrameLayout.LayoutParams.MATCH_PARENT, 720).apply {
+                    topMargin = 120
+                })
+                controller = SharedFrameViewController(activity.host, SharedFrameConfig(durationMillis = 1_000))
+                activity.host.post {
+                    assertTrue(controller.open(SharedFrameViewRequest(
+                        key = "opaque-detail",
+                        sourceHero = source,
+                        drawable = drawable,
+                        detailRoot = detail,
+                        detailHero = hero,
+                        onShown = { opened.countDown() },
+                    )))
+                    started.countDown()
+                }
+            }
+            assertTrue(started.await(3, TimeUnit.SECONDS))
+            SystemClock.sleep(150)
+            scenario.onActivity {
+                assertEquals(SharedFramePhase.Opening, controller.phase)
+                assertEquals(1f, controller.renderSnapshot().overlayAlpha, .001f)
+            }
+            assertTrue(opened.await(3, TimeUnit.SECONDS))
+            scenario.onActivity { assertTrue(controller.close()) }
+            SystemClock.sleep(150)
+            scenario.onActivity {
+                assertEquals(SharedFramePhase.Closing, controller.phase)
+                assertEquals(1f, controller.renderSnapshot().overlayAlpha, .001f)
+            }
+            waitForPhase(controller, SharedFramePhase.Hidden, timeoutMillis = 3_000)
+            scenario.onActivity { controller.dispose() }
+        }
+    }
+
+    @Test
     fun openAndCloseRestoreSourceVisibility() {
         ActivityScenario.launch(SharedFrameTestActivity::class.java).use { scenario ->
             val opened = CountDownLatch(1)
@@ -69,7 +122,11 @@ class SharedFrameViewControllerTest {
                 }
             }
             assertTrue(opened.await(3, TimeUnit.SECONDS))
-            scenario.onActivity { assertTrue(controller.close()) }
+            scenario.onActivity {
+                assertEquals(1f, controller.renderSnapshot().overlayAlpha, .001f)
+                assertTrue(controller.close())
+                assertEquals(1f, controller.renderSnapshot().overlayAlpha, .001f)
+            }
             assertTrue(closed.await(3, TimeUnit.SECONDS))
             scenario.onActivity {
                 assertEquals(1f, source.alpha)
@@ -289,6 +346,7 @@ class SharedFrameViewControllerTest {
             scenario.onActivity {
                 assertEquals(SharedFramePhase.Dragging, controller.phase)
                 dragged = controller.renderSnapshot()
+                assertEquals(1f, dragged.overlayAlpha, .001f)
             }
             val visibleAtRelease = SharedFrameMath.imageTransformInScreen(
                 checkNotNull(dragged.detailImageLocal),
@@ -302,6 +360,7 @@ class SharedFrameViewControllerTest {
             scenario.onActivity {
                 assertEquals(SharedFramePhase.Closing, controller.phase)
                 closing = controller.renderSnapshot()
+                assertEquals(1f, closing.overlayAlpha, .001f)
             }
             val collapsed = checkNotNull(closing.collapsedTransform)
             val scaleDistance = collapsed.scale - dragged.transform.scale

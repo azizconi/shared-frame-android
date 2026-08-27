@@ -29,6 +29,7 @@ import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Rect
 import androidx.compose.ui.geometry.RoundRect
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.CompositingStrategy
 import androidx.compose.ui.graphics.Path
 import androidx.compose.ui.graphics.TransformOrigin
 import androidx.compose.ui.graphics.drawscope.ContentDrawScope
@@ -111,7 +112,7 @@ internal data class RenderState(
     val image: ImageTransform? = null,
     val radius: Float = 0f,
     val scrimAlpha: Float = 0f,
-    val detailAlpha: Float = 1f,
+    val fallbackAlpha: Float? = null,
     val hiddenSourceToken: Long? = null,
 )
 
@@ -202,7 +203,7 @@ class SharedFrameComposeController internal constructor(
                 image = null,
                 radius = 0f,
                 scrimAlpha = config.scrimAlpha,
-                detailAlpha = 1f,
+                fallbackAlpha = null,
             )
         )
     }
@@ -289,7 +290,7 @@ class SharedFrameComposeController internal constructor(
                 image = image,
                 radius = radius,
                 scrimAlpha = 0f,
-                detailAlpha = 1f,
+                fallbackAlpha = null,
                 hiddenSourceToken = prepared.source.token,
             ),
             frames = prepared,
@@ -315,7 +316,7 @@ class SharedFrameComposeController internal constructor(
                 image = null,
                 radius = 0f,
                 scrimAlpha = config.scrimAlpha,
-                detailAlpha = 1f,
+                fallbackAlpha = null,
             ),
         )
     }
@@ -331,7 +332,7 @@ class SharedFrameComposeController internal constructor(
                 transform = UniformTransform.Identity,
                 mask = parent,
                 scrimAlpha = config.scrimAlpha,
-                detailAlpha = 1f,
+                fallbackAlpha = null,
                 hiddenSourceToken = active.openingSource.token,
             ),
             frames = null,
@@ -348,7 +349,7 @@ class SharedFrameComposeController internal constructor(
                 image = null,
                 radius = 0f,
                 scrimAlpha = config.scrimAlpha,
-                detailAlpha = 1f,
+                fallbackAlpha = null,
             ),
         )
     }
@@ -466,9 +467,10 @@ fun SharedFrameHost(
                         translationX = transform.translationX
                         translationY = transform.translationY
                         transformOrigin = TransformOrigin.Center
-                        alpha = if (render.prepared) render.detailAlpha else 0f
+                        alpha = render.fallbackAlpha ?: 1f
+                        compositingStrategy = CompositingStrategy.Offscreen
                     }
-                    .drawWithSharedFrameMask(controller)
+                    .drawPreparedDetailWithSharedFrameMask(controller)
 
                 Box(detailModifier) {
                     SharedFrameDetailScope(controller, active.id, active.key, active.painter).detailContent()
@@ -478,9 +480,10 @@ fun SharedFrameHost(
     }
 }
 
-private fun Modifier.drawWithSharedFrameMask(controller: SharedFrameComposeController): Modifier =
+private fun Modifier.drawPreparedDetailWithSharedFrameMask(controller: SharedFrameComposeController): Modifier =
     drawWithContent {
         val render = controller.renderState()
+        if (!render.prepared) return@drawWithContent
         val mask = render.mask
         if (mask == null) {
             drawContent()
@@ -636,7 +639,7 @@ private suspend fun runOpening(
                 image = localImage,
                 radius = lerp(collapsedRadius, 0f, value),
                 scrimAlpha = lerp(0f, controller.config.scrimAlpha, value),
-                detailAlpha = 1f,
+                fallbackAlpha = null,
                 hiddenSourceToken = prepared.source.token,
             ),
         )
@@ -691,7 +694,7 @@ private suspend fun runClosing(
                 image = startImageLocal,
                 radius = 0f,
                 scrimAlpha = controller.config.scrimAlpha,
-                detailAlpha = 1f,
+                fallbackAlpha = null,
                 hiddenSourceToken = prepared.source.token,
             ),
         )
@@ -724,7 +727,7 @@ private suspend fun runClosing(
                 image = localImage,
                 radius = lerp(0f, collapsedRadius, value),
                 scrimAlpha = lerp(controller.config.scrimAlpha, 0f, value),
-                detailAlpha = 1f,
+                fallbackAlpha = null,
                 hiddenSourceToken = prepared.source.token,
             ),
         )
@@ -739,7 +742,10 @@ private suspend fun runFadeClose(
     operation: Operation.Close,
 ) {
     val start = controller.renderState()
-    controller.updateAnimation(operation.id, start.copy(prepared = true, image = null, hiddenSourceToken = null))
+    controller.updateAnimation(
+        operation.id,
+        start.copy(prepared = true, image = null, fallbackAlpha = 1f, hiddenSourceToken = null),
+    )
     val easing = controller.config.easing
     Animatable(0f).animateTo(
         1f,
@@ -753,7 +759,7 @@ private suspend fun runFadeClose(
             start.copy(
                 prepared = true,
                 image = null,
-                detailAlpha = 1f - value,
+                fallbackAlpha = 1f - value,
                 scrimAlpha = start.scrimAlpha * (1f - value),
                 hiddenSourceToken = null,
             ),
@@ -782,7 +788,7 @@ private suspend fun runCancel(
                 image = null,
                 radius = 0f,
                 scrimAlpha = controller.config.scrimAlpha,
-                detailAlpha = 1f,
+                fallbackAlpha = null,
             ),
         )
     }
